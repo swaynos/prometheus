@@ -1,12 +1,22 @@
 # Prometheus
 
-Prometheus is a proposed extension for native OpenCode V2 Plan and Build.
+Prometheus is an experimental extension for native OpenCode V2 Plan and Build.
 You define the outcome, permissions, and resource limits.
 The agent investigates, prepares the work, implements, and repairs failures without repeated continuation prompts.
 A fresh evaluator checks the result against the agreed criteria.
 
 The [complete specification](SPEC.md) defines the workflow, acceptance criteria, execution controls, and release qualification.
-This README describes the proposed workflow. It does not claim that these commands are installed.
+The controller package implements the workflow mechanics. It does not install commands into your current session automatically.
+Read the [package guide](packages/prometheus/README.md) for installation.
+Read the [runtime reference](docs/PROMETHEUS.md) for limits and recovery.
+
+## Implementation status
+
+The package targets OpenCode 2.0.29.
+Controller tests and scripted native tests exercise the execution mechanics.
+The managed process boundary currently supports macOS.
+Real-model qualification and the plain-Build comparison remain pending.
+See the [qualification reference](docs/QUALIFICATION.md) for test procedures, requirement matrix, and snapshots.
 
 ## Commands
 
