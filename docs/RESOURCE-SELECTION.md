@@ -38,9 +38,11 @@ Malformed settings fail before launch. Both task modes use a 1280x1024 viewport.
 Install through the existing managed-profile installer:
 
 ```sh
-bash scripts/deploy-opencode-agents.sh install --config-dir "$HOME/.config/opencode"
+node scripts/browser-profile.mjs install --config-dir "$HOME/.config/opencode" --quiescent
 ```
 
+Stop browser tasks, login helpers, and affected OpenCode servers before installation.
+The `--quiescent` flag records your assertion. It does not detect active work.
 The installer preserves the shared settings file. Restart OpenCode after changes
 to runtime files, settings, or agent instructions. MCP configuration reports
 `configured`; `browser_status` reports the selected execution mode, applied launch
@@ -108,7 +110,7 @@ restoration and inspection, not an authenticated verdict. The agent checks the
 actual account UI or task access. Selector-based records require their account
 selector before the runtime labels them authenticated. A composer alone is not
 proof of login. State values never enter model context, logs, screenshots, or
-tool output. Private worker/socket lifecycle details are in `ARCHITECTURE.md`.
+tool output. The installed helpers manage private worker and socket records.
 
 ## Image Uploads
 

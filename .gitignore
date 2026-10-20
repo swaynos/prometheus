@@ -1,2 +1,42 @@
 node_modules/
 *.log
+
+# Local credentials
+.env
+.env.*
+!.env.example
+!.env.template
+.npmrc
+.netrc
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Browser authentication and migration data
+prometheus-sessions/
+prometheus-logins/
+cuddly-winner-sessions/
+cuddly-winner-logins/
+prometheus-browser-backups/
+prometheus-browser-migration.json*
+.prometheus-browser-migration.lock
+
+# Controller database and SQLite sidecars
+prometheus.sqlite
+prometheus.sqlite-*
+
+/docs/archives/
+
+# Reserved location for private runtime and qualification output
+# Keep raw evidence, candidate captures, and local manifests here.
+/.prometheus-local/
+
+# Browser authentication and diagnostic artifacts
+**/playwright/.auth/
+test-results/
+playwright-report/
+blob-report/
+*.har

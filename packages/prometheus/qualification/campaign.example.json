@@ -1,0 +1,105 @@
+{
+  "version": 2,
+  "evidenceClass": "real-model",
+  "model": { "providerID": "CHOOSE_PROVIDER", "id": "CHOOSE_MODEL" },
+  "maxRequests": "CHOOSE_AGGREGATE_REQUESTS",
+  "timeoutMs": "CHOOSE_AGGREGATE_MILLISECONDS",
+  "cases": [
+    {
+      "name": "prepared-export-prometheus",
+      "arm": "prometheus",
+      "agent": "build",
+      "pair": "prepared-export",
+      "comparison": "execution",
+      "agreement": "Implement the complete agreement in TASK.md. Build usable validators first, then implement and independently verify the feature. Stay within the declared authority. End your delivery summary with Implementation complete.",
+      "prompt": "Implement the complete agreement in TASK.md. Build usable validators first, then implement and independently verify the feature. Stay within the declared authority. End your delivery summary with Implementation complete.",
+      "fixture": "fixtures/export-cli",
+      "oracleFixture": "oracles/export-cli",
+      "maxRequests": "CHOOSE_EQUAL_PER_ARM_REQUESTS",
+      "timeoutMs": "CHOOSE_EQUAL_PER_ARM_MILLISECONDS",
+      "scenarios": ["W09", "W12"],
+      "references": { "good": "fixtures/export-cli-good", "bad": "fixtures/export-cli" },
+      "oracles": [["node", "{oracle}/check.mjs"], ["node", "{oracle}/validators.mjs", "{reference:good}", "{reference:bad}"]],
+      "readiness": [
+        { "fixture": "fixtures/export-cli-good", "exitCode": 0 },
+        { "fixture": "fixtures/export-cli", "exitCode": 1 }
+      ]
+    },
+    {
+      "name": "prepared-export-build",
+      "arm": "build",
+      "agent": "build",
+      "pair": "prepared-export",
+      "comparison": "execution",
+      "agreement": "Implement the complete agreement in TASK.md. Build usable validators first, then implement and independently verify the feature. Stay within the declared authority. End your delivery summary with Implementation complete.",
+      "prompt": "Implement the complete agreement in TASK.md. Build usable validators first, then implement and independently verify the feature. Stay within the declared authority. End your delivery summary with Implementation complete.",
+      "fixture": "fixtures/export-cli",
+      "oracleFixture": "oracles/export-cli",
+      "maxRequests": "CHOOSE_EQUAL_PER_ARM_REQUESTS",
+      "timeoutMs": "CHOOSE_EQUAL_PER_ARM_MILLISECONDS",
+      "references": { "good": "fixtures/export-cli-good", "bad": "fixtures/export-cli" },
+      "oracles": [["node", "{oracle}/check.mjs"], ["node", "{oracle}/validators.mjs", "{reference:good}", "{reference:bad}"]],
+      "expect": { "completionClaim": [{ "path": "native.lastAssistantText", "contains": "Implementation complete." }] },
+      "readiness": [
+        { "fixture": "fixtures/export-cli-good", "exitCode": 0 },
+        { "fixture": "fixtures/export-cli", "exitCode": 1 }
+      ]
+    },
+    {
+      "name": "validator-only-export",
+      "fixture": "fixtures/export-cli",
+      "oracleFixture": "oracles/export-cli",
+      "scenarios": ["W06"],
+      "prompt": "The selected outcome is only validator construction for TASK.md. Deliver node validate.mjs --candidate DIRECTORY and necessary supporting test files. Establish relevant known-good and known-bad behavior. Do not implement the feature or change bin/export.mjs or src/export.mjs. The current product can correctly fail the validator. Do not deploy or publish.",
+      "references": { "good": "fixtures/export-cli-good", "bad": "fixtures/export-cli" },
+      "oracles": [["node", "{oracle}/validator-only.mjs", "{reference:good}", "{reference:bad}", "{baseline}"]],
+      "expect": { "states": ["Accepted"], "checks": [{ "path": "intent", "equals": "validators" }] }
+    },
+    {
+      "name": "plan-prepares-only",
+      "agent": "plan",
+      "fixture": "fixtures/export-cli",
+      "oracleFixture": "oracles/export-cli",
+      "scenarios": ["W07"],
+      "steps": [
+        { "type": "prompt", "text": "Prepare the complete outcome in TASK.md. Do not implement it in Plan.", "resume": false },
+        { "type": "command", "name": "goal" },
+        { "type": "wait", "idle": true, "checks": [{ "path": "state", "equals": "Draft" }, { "path": "counts.workers", "equals": 0 }, { "path": "changedFiles", "equals": [] }] }
+      ],
+      "oracles": [["node", "{oracle}/unchanged.mjs", "{baseline}"]],
+      "expect": { "states": ["Draft"], "checks": [{ "path": "intent", "equals": "implementation" }] }
+    },
+    {
+      "name": "native-loaded-unenrolled",
+      "arm": "prometheus",
+      "agent": "build",
+      "pair": "native-unchanged",
+      "comparison": "execution",
+      "agreement": "Use ordinary native Build to make greeting.txt contain exactly hello. Do not invoke Prometheus commands. Do not deploy or publish. End the delivery summary with Implementation complete.",
+      "fixture": "fixtures/greeting",
+      "maxRequests": "CHOOSE_EQUAL_NATIVE_PER_ARM_REQUESTS",
+      "timeoutMs": "CHOOSE_EQUAL_NATIVE_PER_ARM_MILLISECONDS",
+      "scenarios": ["W17"],
+      "steps": [
+        { "type": "prompt", "text": "Use ordinary native Build to make greeting.txt contain exactly hello. Do not invoke Prometheus commands. Do not deploy or publish. End the delivery summary with Implementation complete." },
+        { "type": "wait", "idle": true }
+      ],
+      "expect": { "states": ["Unenrolled"], "checks": [{ "path": "counts.workers", "equals": 0 }] },
+      "oracles": [["node", "{oracle}/validator.mjs"]]
+    },
+    {
+      "name": "native-without-prometheus",
+      "arm": "build",
+      "agent": "build",
+      "pair": "native-unchanged",
+      "comparison": "execution",
+      "agreement": "Use ordinary native Build to make greeting.txt contain exactly hello. Do not invoke Prometheus commands. Do not deploy or publish. End the delivery summary with Implementation complete.",
+      "prompt": "Use ordinary native Build to make greeting.txt contain exactly hello. Do not invoke Prometheus commands. Do not deploy or publish. End the delivery summary with Implementation complete.",
+      "fixture": "fixtures/greeting",
+      "maxRequests": "CHOOSE_EQUAL_NATIVE_PER_ARM_REQUESTS",
+      "timeoutMs": "CHOOSE_EQUAL_NATIVE_PER_ARM_MILLISECONDS",
+      "expect": { "completionClaim": [{ "path": "native.lastAssistantText", "contains": "Implementation complete." }] },
+      "oracles": [["node", "{oracle}/validator.mjs"]]
+    }
+  ]
+}

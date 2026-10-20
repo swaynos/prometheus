@@ -1,0 +1,6 @@
+{
+  "name": "qualification-export-cli",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test test/*.test.mjs" }
+}
