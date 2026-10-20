@@ -8,7 +8,7 @@ A fresh evaluator checks the result against the agreed criteria.
 The [complete specification](SPEC.md) defines the workflow, acceptance criteria, execution controls, and release qualification.
 The controller package implements the workflow mechanics. It does not install commands into your current session automatically.
 Read the [package guide](packages/prometheus/README.md) for installation.
-Read the [runtime reference](docs/PROMETHEUS.md) for limits and recovery.
+Read the [runtime reference](docs/PROMETHEUS.md) for limits and recovery, or browse the [documentation index](docs/README.md).
 
 ## Implementation status
 
@@ -85,7 +85,9 @@ It also pauses when a consequential action has an uncertain outcome.
 Explicit authority is necessary to resume a paused run.
 
 `/browser` remains a separate human-invoked command outside this execution workflow.
-See the [resource selection guide](docs/RESOURCE-SELECTION.md) for the existing browser integration.
+The browser profile installer registers this command and the `prometheus-browser` MCP server.
+See the [resource selection guide](docs/RESOURCE-SELECTION.md) for browser procedures
+and the [operations guide](docs/BROWSER-OPERATIONS.md) for installation, cutover, and recovery.
 
 ## Design principles
 

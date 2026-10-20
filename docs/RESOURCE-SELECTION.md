@@ -4,8 +4,9 @@ Workflow selection and shared safeguards live in `../rules/resource-selection.md
 Read the relevant tool procedures before using `prometheus-browser`, including
 in user/project-selected workflows. Apply the managed mode and login procedures
 only when that policy selects the default managed workflow.
-The installer deploys it under `<config_dir>/docs/` without adding it to OpenCode's
-always-loaded instructions.
+The installer deploys this reference under `<config_dir>/prometheus-browser/docs/`
+without adding it to OpenCode's always-loaded instructions. The compact rule is
+installed under `<config_dir>/prometheus-browser/rules/`.
 
 The managed Playwright runtime uses configured `headless` or `virtual-display`
 task mode and a separate headed human-login window. These mode and login
@@ -18,9 +19,9 @@ The MCP and login helper read `<config_dir>/prometheus-browser.json`:
 
 ```json
 {
-  "channel": "chrome",
-  "executionMode": "virtual-display",
-  "automationCompatibility": true
+  "channel": "default",
+  "executionMode": "headless",
+  "automationCompatibility": false
 }
 ```
 
@@ -35,7 +36,16 @@ it, `PROMETHEUS_BROWSER_CHANNEL`, `PROMETHEUS_BROWSER_EXECUTION_MODE`, and
 `PROMETHEUS_BROWSER_AUTOMATION_COMPATIBILITY=true|false` supply these settings.
 Malformed settings fail before launch. Both task modes use a 1280x1024 viewport.
 
-Install through the existing managed-profile installer:
+Install dependencies and the selected browser from the repository root first:
+
+```sh
+npm ci
+npx playwright install chromium
+```
+
+Use installed Google Chrome instead when `channel` is `chrome`. Linux
+`virtual-display` mode also requires `xvfb` and `xauth`. Then install the managed
+profile outside the repository:
 
 ```sh
 node scripts/browser-profile.mjs install --config-dir "$HOME/.config/opencode" --quiescent
@@ -47,6 +57,17 @@ The installer preserves the shared settings file. Restart OpenCode after changes
 to runtime files, settings, or agent instructions. MCP configuration reports
 `configured`; `browser_status` reports the selected execution mode, applied launch
 options, browser version, virtual display, and page health.
+
+For an existing `cuddly-winner-browser` registration, add `--migrate`. See the
+[operations and recovery guide](BROWSER-OPERATIONS.md) in the source checkout for
+cutover, update, rollback, and qualification procedures. Installation launches a
+blank task browser to check readiness. It never opens a login window or loads
+saved authentication during that check.
+
+The installer registers `/browser <request>` as a human-invoked Build prompt
+command. Use it in a separate native conversation. The controller does not
+install this command, and enrolled Prometheus sessions do not receive browser
+tools. Project configuration can override global commands and MCP registrations.
 
 ### Virtual-display execution
 
@@ -75,9 +96,9 @@ Use the same configuration root and state name for the handoff. Substitute the
 selected config directory for `$HOME/.config/opencode` if it differs:
 
 ```sh
-node "$HOME/.config/opencode/opencode-browser-login.mjs" start --config-dir "$HOME/.config/opencode" --name site --url https://example.com/ --origin https://example.com
+node "$HOME/.config/opencode/prometheus-browser/opencode-browser-login.mjs" start --config-dir "$HOME/.config/opencode" --name site --url https://example.com/ --origin https://example.com
 # End the turn; capture only after the user's reply:
-node "$HOME/.config/opencode/opencode-browser-login.mjs" complete --config-dir "$HOME/.config/opencode" --name site
+node "$HOME/.config/opencode/prometheus-browser/opencode-browser-login.mjs" complete --config-dir "$HOME/.config/opencode" --name site
 ```
 
 `start` returns `awaiting-user`; its detached worker survives between turns.
