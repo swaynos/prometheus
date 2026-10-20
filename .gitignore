@@ -29,6 +29,7 @@ prometheus.sqlite
 prometheus.sqlite-*
 
 /docs/archives/
+/docs/TEMP-*.md
 
 # Reserved location for private runtime and qualification output
 # Keep raw evidence, candidate captures, and local manifests here.
