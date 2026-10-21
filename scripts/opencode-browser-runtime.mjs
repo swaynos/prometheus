@@ -207,6 +207,27 @@ async function waitForCdp(endpoint, timeoutMs = 15000) {
   throw new Error(`timed out waiting for remote debugging on ${endpoint}`);
 }
 
+export async function applyAutomationCompatibility(context) {
+  if (typeof context?.addInitScript === "function") {
+    await context.addInitScript(() => {
+      try {
+        delete Object.getPrototypeOf(navigator).webdriver;
+      } catch {}
+      try {
+        delete navigator.webdriver;
+      } catch {}
+      if (navigator.webdriver !== undefined) {
+        try {
+          Object.defineProperty(Object.getPrototypeOf(navigator), "webdriver", {
+            get: () => undefined,
+            configurable: true,
+          });
+        } catch {}
+      }
+    });
+  }
+}
+
 export async function launchExternalCdpContext(chromium, selected) {
   const cdp = selected.cdpOptions || {};
   let endpoint = cdp.endpoint;
@@ -287,6 +308,9 @@ export async function launchExternalCdpContext(chromium, selected) {
     const context = existingContexts.length > 0
       ? existingContexts[0]
       : await browser.newContext(browserContextOptions(selected));
+    if (selected.automationCompatibility) {
+      await applyAutomationCompatibility(context);
+    }
     return { browser, context };
   } catch (error) {
     await browser.close().catch(() => {});
@@ -303,7 +327,13 @@ export async function createTaskContext(chromium, config) {
     return launchExternalCdpContext(chromium, selected);
   }
   const browser = await chromium.launch(browserLaunchOptions(selected));
-  try { return { browser, context: await browser.newContext(browserContextOptions(selected)) }; }
+  try {
+    const context = await browser.newContext(browserContextOptions(selected));
+    if (selected.automationCompatibility) {
+      await applyAutomationCompatibility(context);
+    }
+    return { browser, context };
+  }
   catch (error) { await browser.close().catch(() => {}); throw error; }
 }
 

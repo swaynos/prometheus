@@ -27,9 +27,10 @@ The MCP and login helper read `<config_dir>/prometheus-browser.json`:
 
 `channel` accepts `default`, `chromium` (full Chromium), or `chrome` (installed
 Google Chrome). `executionMode` defaults to `headless`; `automationCompatibility`
-defaults to false. When enabled, compatibility mode omits `--enable-automation`
-and adds `--disable-blink-features=AutomationControlled` for both login and task
-browsers. It adds no JavaScript webdriver override or user-agent spoofing.
+defaults to false. When enabled, compatibility mode omits `--enable-automation`,
+adds `--disable-blink-features=AutomationControlled`, and hides the automation
+property by changing `navigator.webdriver` so page scripts receive `undefined`.
+It adds no user-agent spoofing.
 
 The settings file takes precedence over inherited environment values. Without
 it, `PROMETHEUS_BROWSER_CHANNEL`, `PROMETHEUS_BROWSER_EXECUTION_MODE`, and
@@ -161,7 +162,8 @@ spaced keyboard events. The existing action timeout still applies. After an
 interrupted typing action, inspect the field before adding more text.
 
 `browser_fill` is unchanged. No automatic mouse-path simulation, user-agent
-spoofing, or new navigator/WebGL override is installed.
+spoofing, or WebGL override is installed beyond the opt-in `navigator.webdriver`
+property removal.
 
 ## Browser Actions And Login
 
