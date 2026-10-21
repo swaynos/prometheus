@@ -224,6 +224,32 @@ export async function applyAutomationCompatibility(context) {
           });
         } catch {}
       }
+      try {
+        Object.defineProperty(Object.getPrototypeOf(navigator), "languages", {
+          get: () => ["en-US", "en"],
+          configurable: true,
+        });
+      } catch {
+        try {
+          Object.defineProperty(navigator, "languages", {
+            get: () => ["en-US", "en"],
+            configurable: true,
+          });
+        } catch {}
+      }
+      try {
+        Object.defineProperty(Object.getPrototypeOf(navigator), "plugins", {
+          get: () => [1, 2, 3, 4, 5],
+          configurable: true,
+        });
+      } catch {
+        try {
+          Object.defineProperty(navigator, "plugins", {
+            get: () => [1, 2, 3, 4, 5],
+            configurable: true,
+          });
+        } catch {}
+      }
     });
   }
 }
