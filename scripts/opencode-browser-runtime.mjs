@@ -90,9 +90,12 @@ function validateCdpOptions(value) {
 
 export function validateBrowserConfig(config) {
   if (!config || typeof config !== "object" || Array.isArray(config) ||
-       Object.keys(config).some((key) => !["channel", "profile", "automationCompatibility", "executionMode", "launchOptions", "contextOptions", "cdpOptions", "identityProfile"].includes(key)) ||
+       Object.keys(config).some((key) => !["channel", "profile", "automationCompatibility", "executionMode", "launchOptions", "contextOptions", "cdpOptions", "identityProfile", "humanize"].includes(key)) ||
       !["default", "chromium", "chrome", "msedge"].includes(config.channel)) {
     throw new Error("browser must specify channel: default, chromium, chrome, or msedge");
+  }
+  if (config.humanize !== undefined && typeof config.humanize !== "boolean") {
+    throw new Error("humanize must be boolean");
   }
   if (config.automationCompatibility !== undefined && typeof config.automationCompatibility !== "boolean") {
     throw new Error("automationCompatibility must be boolean");
@@ -122,7 +125,8 @@ export function validateBrowserConfig(config) {
     if (Object.keys(config.contextOptions ?? {}).some(key => key in profile.contextOptions)) throw new Error("profile display settings cannot be overridden; select a different profile");
   }
   if (config.identityProfile && mode === "external-cdp") throw new Error("identity profiles are not supported with external-cdp");
-  return { channel: config.channel, ...(config.automationCompatibility === true ? { automationCompatibility: true } : {}),
+  return { channel: config.channel, ...(config.automationCompatibility !== undefined ? { automationCompatibility: config.automationCompatibility } : {}),
+    ...(config.humanize !== undefined ? { humanize: config.humanize } : {}),
     ...(config.profile !== undefined ? { profile: profile.id } : {}),
     ...(config.identityProfile !== undefined ? { identityProfile: config.identityProfile } : {}),
     ...(mode === "virtual-display" || mode === "external-cdp" ? { executionMode: mode } : {}),
@@ -159,9 +163,18 @@ export function browserConfigFromEnv(env = process.env) {
     ...(cdpEndpoint !== undefined ? { endpoint: cdpEndpoint } : {}),
     ...(cdpUserDataDir !== undefined ? { userDataDir: cdpUserDataDir } : {}),
   } : undefined;
-  return validateBrowserConfig({ channel: env.PROMETHEUS_BROWSER_CHANNEL || "default", automationCompatibility: compatibility === "true",
+  const humanizeEnv = env.PROMETHEUS_BROWSER_HUMANIZE;
+  let humanize;
+  if (humanizeEnv !== undefined) {
+    if (["true", "1", "yes", "on"].includes(humanizeEnv.trim().toLowerCase())) humanize = true;
+    else if (["false", "0", "no", "off"].includes(humanizeEnv.trim().toLowerCase())) humanize = false;
+    else throw new Error("invalid browser humanize setting");
+  }
+  return validateBrowserConfig({ channel: env.PROMETHEUS_BROWSER_CHANNEL || "default",
+    ...(compatibility !== undefined ? { automationCompatibility: compatibility === "true" } : {}),
     ...(env.PROMETHEUS_BROWSER_PROFILE ? { profile: env.PROMETHEUS_BROWSER_PROFILE } : {}),
     ...(identityProfile !== undefined ? { identityProfile } : {}),
+    ...(humanize !== undefined ? { humanize } : {}),
     executionMode: env.PROMETHEUS_BROWSER_EXECUTION_MODE,
     ...(cdpOptions ? { cdpOptions } : {}) });
 }
@@ -332,6 +345,41 @@ export async function applyAutomationCompatibility(context) {
           });
         } catch {}
       }
+      try {
+        if (!window.chrome) {
+          window.chrome = {
+            app: { isInstalled: false, InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" }, RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" } },
+            csi: () => {},
+            loadTimes: () => {},
+            runtime: {},
+          };
+        } else if (!window.chrome.runtime) {
+          window.chrome.runtime = {};
+        }
+      } catch {}
+      try {
+        if (typeof Notification !== "undefined" && Notification.permission === "denied") {
+          try {
+            Object.defineProperty(Notification, "permission", { get: () => "default", configurable: true });
+          } catch {}
+        }
+        if (navigator.permissions && navigator.permissions.query) {
+          const origQuery = navigator.permissions.query.bind(navigator.permissions);
+          navigator.permissions.query = (parameters) =>
+            parameters && parameters.name === "notifications"
+              ? Promise.resolve({ state: Notification.permission || "default", onchange: null, addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false })
+              : origQuery(parameters);
+        }
+      } catch {}
+      try {
+        if (/HeadlessChrome/.test(navigator.userAgent)) {
+          const cleanUa = navigator.userAgent.replace(/HeadlessChrome/, "Chrome");
+          Object.defineProperty(Object.getPrototypeOf(navigator), "userAgent", {
+            get: () => cleanUa,
+            configurable: true,
+          });
+        }
+      } catch {}
     });
   }
 }
@@ -424,7 +472,10 @@ export function resolveIdentityProfile(selected) {
   return candidates[Math.floor(Math.random() * candidates.length)];
 }
 
-export async function launchExternalCdpContext(chromium, selected) {
+export async function launchExternalCdpContext(chromium, selected, options = {}) {
+  if (selected.automationCompatibility === undefined) {
+    selected = { ...selected, automationCompatibility: true };
+  }
   const cdp = selected.cdpOptions || {};
   let endpoint = cdp.endpoint;
   let child = null;
@@ -441,15 +492,18 @@ export async function launchExternalCdpContext(chromium, selected) {
     }
 
     const execPath = resolveChromeExecutablePath(chromium, selected.channel);
-    const headless = selected.launchOptions?.headless ?? (selected.executionMode !== "virtual-display");
+    const headless = options.headless ?? selected.launchOptions?.headless ?? (selected.executionMode !== "virtual-display");
+    const defaultUa = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
+    const ua = selected.contextOptions?.userAgent ?? (headless ? defaultUa : undefined);
     const args = [
-      headless ? "--headless=new" : "--headless=false",
+      ...(headless ? ["--headless=new"] : []),
+      "--remote-debugging-address=127.0.0.1",
       `--remote-debugging-port=${port}`,
       `--user-data-dir=${userDataDir}`,
       "--no-first-run",
       "--no-default-browser-check",
-      ...(selected.automationCompatibility ? ["--disable-blink-features=AutomationControlled"] : []),
-      ...(selected.launchOptions?.args || []),
+      "--disable-blink-features=AutomationControlled",
+      ...(ua ? [`--user-agent=${ua}`] : []),
       "about:blank",
     ];
 
@@ -474,7 +528,7 @@ export async function launchExternalCdpContext(chromium, selected) {
 
   let browser;
   try {
-    browser = await chromium.connectOverCDP(endpoint);
+    browser = await chromium.connectOverCDP(endpoint, { timeout: cdp.timeout ?? 15000 });
   } catch (err) {
     if (child && !child.killed) {
       try { child.kill("SIGTERM"); } catch {}
@@ -524,6 +578,18 @@ export async function launchExternalCdpContext(chromium, selected) {
 
 export async function createTaskContext(chromium, config, engines) {
   let selected = validateBrowserConfig(config);
+  const hasDisplayOverrides = Object.keys(selected.contextOptions ?? {}).some(key =>
+    ["viewport", "screen", "deviceScaleFactor", "userAgent"].includes(key)
+  );
+  if (selected.identityProfile === undefined && selected.profile === undefined && selected.executionMode !== "external-cdp" && !hasDisplayOverrides) {
+    selected = { ...selected, identityProfile: "random" };
+  }
+  if (selected.automationCompatibility === undefined) {
+    const engine = (selected.profile ? getBrowserProfile(selected.profile) : null)?.engine ?? "chromium";
+    if (engine === "chromium") {
+      selected = { ...selected, automationCompatibility: true };
+    }
+  }
   // Resolve legacy randomness exactly once; downstream settings and metadata use the same ID.
   if (selected.identityProfile === true || selected.identityProfile === "random") {
     selected = validateBrowserConfig({ ...selected, identityProfile: resolveIdentityProfile(selected).id });

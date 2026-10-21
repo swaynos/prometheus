@@ -4,7 +4,7 @@ import http from "node:http";
 import { execFileSync } from "node:child_process";
 import { chromium, devices } from "playwright";
 import { BROWSER_PROFILES, PROFILE_CATALOG_SHA256, browserProfileInfo, getBrowserProfile,
-  listBrowserProfiles, resolveBrowserProfile } from "../../scripts/browser-profiles.mjs";
+  listBrowserProfiles, resolveBrowserProfile, currentHostOs, getHostMatchedProfile } from "../../scripts/browser-profiles.mjs";
 import { browserConfigFromEnv, browserContextOptions, browserLaunchOptions, browserRuntimeInfo,
   collectBrowserProfileEvidence, createTaskContext, selectBrowserType, validateBrowserConfig } from "../../scripts/opencode-browser-runtime.mjs";
 
@@ -136,4 +136,23 @@ test("catalog CLI supports filtered listing, inspection and reproducible samplin
   assert.equal(run("show", "pw-pixel-7").id, "pw-pixel-7");
   assert.deepEqual(run("sample", "seed", "--engine", "chromium"), run("sample", "seed", "--engine", "chromium"));
   assert.ok(run("list", "--engine", "firefox").profiles.every(p => p.engine === "firefox"));
+});
+
+test("host profile matching guards against Windows and unrecognised platforms", () => {
+  assert.throws(() => currentHostOs("win32"), /Windows is not supported/);
+  assert.throws(() => currentHostOs("freebsd"), /unsupported host platform/);
+  assert.equal(currentHostOs("darwin"), "macOS");
+  assert.equal(currentHostOs("linux"), "Linux");
+
+  const mac = getHostMatchedProfile({ platform: "darwin", seed: "test-seed" });
+  assert.equal(mac.os, "macOS");
+  assert.equal(mac.engine, "chromium");
+  assert.equal(mac.deviceClass, "desktop");
+
+  const linux = getHostMatchedProfile({ platform: "linux", seed: "test-seed" });
+  assert.equal(linux.os, "Linux");
+  assert.equal(linux.engine, "chromium");
+  assert.equal(linux.deviceClass, "desktop");
+
+  assert.throws(() => getHostMatchedProfile({ platform: "win32" }), /Windows is not supported/);
 });

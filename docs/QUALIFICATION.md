@@ -41,6 +41,9 @@ Environment requirements:
 - Native crash tests terminate only owned isolated service groups.
 - Location activation starts recovery without model requests or automatic action replays.
 - Process-boundary tests require macOS `sandbox-exec`. Record platform skips on other platforms.
+- Linux controller execution is not supported. The current process boundary requires macOS `sandbox-exec`.
+  Implement and verify a Linux process boundary in a Linux environment before claiming controller support.
+  Linux browser support does not establish Linux controller support. No Linux controller fix is included in this update.
 - Controlled destination tests record loopback effects before disconnected or held replies. They verify observation without replays.
 
 ## 3. Real-Model Admission and Campaign Runner

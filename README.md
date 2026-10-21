@@ -14,7 +14,9 @@ Read the [runtime reference](docs/PROMETHEUS.md) for limits and recovery, or bro
 
 The package targets OpenCode 2.0.29.
 Controller tests and scripted native tests exercise the execution mechanics.
-The managed process boundary currently supports macOS.
+The controller's managed process boundary currently supports macOS only.
+Linux controller support remains an implementation gap. Implementation and verification are deferred to a Linux environment.
+The separate browser runtime supports macOS and Linux. Windows is not supported at this time.
 Real-model qualification and the plain-Build comparison remain pending.
 See the [qualification reference](docs/QUALIFICATION.md) for test procedures, requirement matrix, and snapshots.
 

@@ -38,7 +38,7 @@ test("assertValidName rejects path traversal and separators", () => {
   for (const bad of ["..", ".", "a/b", "../x", "/abs", "a\\b", "", "a b"]) {
     assert.throws(() => assertValidName(bad), BrowserStateError, `should reject ${JSON.stringify(bad)}`);
   }
-  for (const ok of ["chatgpt", "site.example", "a_b-1", "A1"]) {
+  for (const ok of ["web-session", "site.example", "a_b-1", "A1"]) {
     assert.equal(assertValidName(ok), ok);
   }
 });
@@ -56,7 +56,7 @@ test("saveState writes a mode-0600 record and readRecord round-trips", () => {
   const configDir = tmpConfig();
   const file = saveState({
     configDir,
-    name: "chatgpt",
+    name: "web-session",
     origins: ["https://example.com"],
     storageState: sampleState,
     verification: { selector: "#account-menu" },
@@ -66,7 +66,7 @@ test("saveState writes a mode-0600 record and readRecord round-trips", () => {
     const mode = fs.statSync(file).st_mode ?? fs.statSync(file).mode;
     assert.equal(mode & 0o777, 0o600, "record must be owner read/write only");
   }
-  const rec = readRecord(configDir, "chatgpt");
+  const rec = readRecord(configDir, "web-session");
   assert.equal(rec.schemaVersion, 1);
   assert.deepEqual(rec.origins, ["https://example.com"]);
   assert.equal(rec.storageState.cookies[0].value, "SECRET-COOKIE-VALUE");

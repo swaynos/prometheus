@@ -35,6 +35,7 @@ import path from "node:path";
 import { loadStateForOrigin, listStates } from "./opencode-browser-state.mjs";
 import { browserConfigFromEnv, browserLaunchOptions, browserRuntimeInfo, createTaskContext, hydrateBrowserState } from "./opencode-browser-runtime.mjs";
 import { enterTaskDisplay } from "./opencode-browser-service.mjs";
+import { humanClick, humanType, applyNavigationDelay } from "./opencode-browser-humanize.mjs";
 
 // Re-exec the actual MCP service, not its caller, inside an isolated display.
 const TASK_CONFIG = browserConfigFromEnv();
@@ -63,13 +64,22 @@ const STATE_NAMES = (process.env.PROMETHEUS_BROWSER_STATES || "")
 const SERVER_INFO = { name: "prometheus-browser", version: "1.1.0" };
 const PROTOCOL_VERSION = "2024-11-05";
 
+const SESSION_CONFIG = {
+  humanize: Boolean(TASK_CONFIG.humanize),
+};
+
+function resolveHumanize(toolArg) {
+  if (typeof toolArg === "boolean") return toolArg;
+  return Boolean(SESSION_CONFIG.humanize);
+}
+
 // --- Tool surface ----------------------------------------------------------
 // Each tool has a Playwright-backed handler. Cookie/storage export tools are
 // deliberately absent: login state enters only through the private hydration
 // path, never through a model-visible tool.
 
 const TOOLS = [
-  { name: "browser_navigate", description: "Navigate to a URL. Optionally select a load event and wait for a visible readiness selector without fixed sleeps.", inputSchema: { type: "object", properties: { url: { type: "string" }, wait_until: { type: "string", enum: ["commit", "domcontentloaded", "load", "networkidle"] }, ready_selector: { type: "string" }, timeout: { type: "number", description: "Total navigation/readiness budget in seconds, bounded by the transport budget." } }, required: ["url"] } },
+  { name: "browser_navigate", description: "Navigate to a URL. Optionally select a load event and wait for a visible readiness selector without fixed sleeps.", inputSchema: { type: "object", properties: { url: { type: "string" }, wait_until: { type: "string", enum: ["commit", "domcontentloaded", "load", "networkidle"] }, ready_selector: { type: "string" }, timeout: { type: "number", description: "Total navigation/readiness budget in seconds, bounded by the transport budget." }, humanize: { type: "boolean", description: "Simulate human behavior (2-4s settle delay post-navigation)." } }, required: ["url"] } },
   { name: "browser_status", description: "Return non-secret browser runtime and page health metadata.", inputSchema: { type: "object", properties: {} } },
   { name: "browser_navigate_back", description: "Go back in history.", inputSchema: { type: "object", properties: {} } },
   { name: "browser_forward", description: "Go forward in history.", inputSchema: { type: "object", properties: {} } },
@@ -78,9 +88,9 @@ const TOOLS = [
   { name: "browser_markdown", description: "Current page rendered as terse Markdown-ish text.", inputSchema: { type: "object", properties: { max_chars: { type: "number" } } } },
   { name: "browser_interactive_elements", description: "List clickable/typeable elements with stable refs.", inputSchema: { type: "object", properties: { limit: { type: "number" } } } },
   { name: "browser_links", description: "List anchor links as {text, href}.", inputSchema: { type: "object", properties: { limit: { type: "number" } } } },
-  { name: "browser_click", description: "Click an element by ref or selector.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" } } } },
+  { name: "browser_click", description: "Click an element by ref or selector.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, humanize: { type: "boolean", description: "Simulate curved mouse movement before clicking." } } } },
   { name: "browser_fill", description: "Set the value of an input by ref or selector.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, value: { type: "string" } }, required: ["value"] } },
-  { name: "browser_type", description: "Type text into an input (appends). Optional fixed delay_ms supports interfaces that need spaced keyboard events; default 0.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, text: { type: "string" }, delay_ms: { type: "number", minimum: 0, maximum: 1000 } }, required: ["text"] } },
+  { name: "browser_type", description: "Type text into an input (appends). Optional fixed delay_ms supports interfaces that need spaced keyboard events; default 0.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, text: { type: "string" }, delay_ms: { type: "number", minimum: 0, maximum: 1000 }, humanize: { type: "boolean", description: "Simulate human typing jitter (50-150ms per character)." } }, required: ["text"] } },
   { name: "browser_fill_form", description: "Fill multiple fields, optionally submit.", inputSchema: { type: "object", properties: { fields: { type: "array" }, submit_ref: { type: "string" }, submit_selector: { type: "string" } }, required: ["fields"] } },
   { name: "browser_select_option", description: "Select an option in a <select>.", inputSchema: { type: "object", properties: { selector: { type: "string" }, value: { type: "string" } }, required: ["selector", "value"] } },
   { name: "browser_press_key", description: "Dispatch a keyboard key.", inputSchema: { type: "object", properties: { key: { type: "string" }, selector: { type: "string" } }, required: ["key"] } },
@@ -101,6 +111,7 @@ const TOOLS = [
   { name: "browser_tab_list", description: "List open tabs.", inputSchema: { type: "object", properties: {} } },
   { name: "browser_tab_switch", description: "Switch the active tab by index.", inputSchema: { type: "object", properties: { index: { type: "number" } }, required: ["index"] } },
   { name: "browser_tab_close", description: "Close a tab by index (default active).", inputSchema: { type: "object", properties: { index: { type: "number" } } } },
+  { name: "browser_configure", description: "Adjust runtime settings for the browser session without restarting the server.", inputSchema: { type: "object", properties: { humanize: { type: "boolean", description: "Enable or disable simulated human behavior (typing delays, curved mouse movement, navigation delays) for all subsequent actions in this session." } } } },
   { name: "browser_close", description: "Close the browser and reset state.", inputSchema: { type: "object", properties: {} } },
 ];
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
@@ -477,6 +488,7 @@ const HANDLERS = {
       browserVersion: browser?.version() ?? null,
       contextOpen: Boolean(context),
       pageOpen,
+      humanize: SESSION_CONFIG.humanize,
       url: pageOpen ? page.url() : null,
       hydratedAuthentication: pageOpen && (() => {
         try {
@@ -515,6 +527,9 @@ const HANDLERS = {
     }
     // A denied page is not evidence that saved credentials need replacement.
     if (!classification) await verifyHydratedAccount(page, hydration);
+    if (resolveHumanize(args.humanize)) {
+      await applyNavigationDelay(remaining());
+    }
     return text(`navigated to ${page.url()} (status ${status ?? "n/a"}${classification})${hydration?.method === "user-confirmed" ? "; user-confirmed state loaded: verify account or requested task access in this context before claiming login success" : ""}`);
   },
   async browser_navigate_back() {
@@ -569,7 +584,11 @@ const HANDLERS = {
     const page = activePage();
     const locator = locatorFor(page, args).first();
     await assertActionable(locator, "click");
-    await locator.click({ timeout: DEFAULT_TIMEOUT });
+    if (resolveHumanize(args.humanize)) {
+      await humanClick(locator, page, { timeout: DEFAULT_TIMEOUT });
+    } else {
+      await locator.click({ timeout: DEFAULT_TIMEOUT });
+    }
     return text(`clicked at ${page.url()}`);
   },
   async browser_fill(args) {
@@ -584,8 +603,16 @@ const HANDLERS = {
     if (!Number.isFinite(delay) || delay < 0 || delay > 1000) throw new Error("delay_ms must be from 0 to 1000 milliseconds");
     const page = activePage();
     const locator = locatorFor(page, args).first();
-    await assertActionable(locator, "type");
-    await locator.pressSequentially(args.text, { delay, timeout: DEFAULT_TIMEOUT });
+    if (resolveHumanize(args.humanize) && args.delay_ms === undefined) {
+      const deadline = performance.now() + MAX_WAIT_MS;
+      await assertActionable(locator, "type", MAX_WAIT_MS);
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw new Error("typing deadline expired; inspect the field before retrying");
+      await humanType(locator, args.text, { timeout: remaining });
+    } else {
+      await assertActionable(locator, "type");
+      await locator.pressSequentially(args.text, { delay, timeout: DEFAULT_TIMEOUT });
+    }
     return text(`typed at ${page.url()}`);
   },
   async browser_fill_form(args) {
@@ -914,6 +941,16 @@ const HANDLERS = {
     pages.splice(index, 1);
     if (activeIndex >= pages.length) activeIndex = Math.max(0, pages.length - 1);
     return text(`closed tab ${index}`);
+  },
+  async browser_configure(args) {
+    if (args.humanize !== undefined) {
+      if (typeof args.humanize !== "boolean") throw new Error("humanize must be boolean");
+      SESSION_CONFIG.humanize = args.humanize;
+    }
+    return text({
+      configured: true,
+      humanize: SESSION_CONFIG.humanize,
+    });
   },
   async browser_close() {
     await closeBrowser();

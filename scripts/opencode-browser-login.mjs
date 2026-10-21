@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // opencode-browser-login.mjs
 //
-// Headed Playwright login helper. This is the ONLY place a visible browser
-// window opens in the Playwright-only browser stack. A person completes a
+// Headed login helper. Ordinary Chromium login launches the selected browser
+// directly and attaches over CDP; emulation uses a Playwright launcher. A person completes a
 // required login here; the approved Playwright storage state is saved through
 // opencode-browser-state.mjs (owner-only, origin-scoped) and later loaded
 // privately by the task MCP server. This helper never performs task work
@@ -34,7 +34,7 @@ import {
   removeState,
 } from "./opencode-browser-state.mjs";
 
-import { browserLaunchOptions, browserContextOptions, browserConfigFromEnv, applyAutomationCompatibility, applyBrowserProfile, resolveIdentityProfile, selectBrowserType, validateBrowserConfig } from "./opencode-browser-runtime.mjs";
+import { browserLaunchOptions, browserContextOptions, browserConfigFromEnv, applyAutomationCompatibility, applyBrowserProfile, resolveIdentityProfile, selectBrowserType, validateBrowserConfig, launchExternalCdpContext } from "./opencode-browser-runtime.mjs";
 
 const OPERATION_TIMEOUT_MS = 30_000;
 
@@ -276,13 +276,38 @@ export async function captureConfirmedState(context, opts) {
   return { storageState, sessionStorage: opts.captureSessionStorage ? sessionStorage : undefined };
 }
 
+// Select before opening any page, never as a retry after a site denies access.
+// Existing contexts cannot receive Playwright creation-time emulation settings.
+export function loginBrowserConfig(config) {
+  const selected = validateBrowserConfig(config);
+  if (selected.executionMode === "external-cdp") return selected;
+  if (selected.channel !== "msedge" && !selected.profile && !selected.identityProfile &&
+      selected.executionMode !== "virtual-display" &&
+      !Object.keys(selected.contextOptions ?? {}).length &&
+      !Object.keys(selected.launchOptions ?? {}).length) {
+    return { ...selected, executionMode: "external-cdp" };
+  }
+  return selected;
+}
+
 export async function serveLogin(opts, dependencies = {}) {
+  opts = { ...opts, browser: loginBrowserConfig(opts.browser) };
   const socketPath = loginSocket(opts.configDir, opts.name);
-  let context, profileDir, closing, busy = false, listening = false, ready = false;
+  let context, cdpBrowser, loginPage, profileDir, closing, busy = false, listening = false, ready = false;
+  const closeBrowser = async () => {
+    if (cdpBrowser) {
+      // Close only our handoff tab. Browser.close disconnects a CDP attachment;
+      // the runtime terminates Chrome only when it launched that process itself.
+      await loginPage?.close().catch(() => {});
+      await cdpBrowser.close().catch(() => {});
+    } else {
+      await context?.close().catch(() => {});
+    }
+  };
   const server = net.createServer();
   const cleanup = () => closing ||= (async () => {
     if (listening) server.close();
-    await context?.close().catch(() => {});
+    await closeBrowser();
     if (profileDir) fs.rmSync(profileDir, { recursive: true, force: true });
     process.removeListener("SIGINT", interrupt); process.removeListener("SIGTERM", interrupt);
     process.removeListener("disconnect", disconnected);
@@ -328,27 +353,45 @@ export async function serveLogin(opts, dependencies = {}) {
       });
     });
     const { chromium } = dependencies.chromium ? dependencies : await import("playwright");
-    if (opts.browser.identityProfile === true || opts.browser.identityProfile === "random") {
-      opts.browser = validateBrowserConfig({ ...opts.browser, identityProfile: resolveIdentityProfile(opts.browser).id });
+    if (opts.browser.executionMode === "external-cdp") {
+      ({ browser: cdpBrowser, context } = await (dependencies.launchExternalCdpContext || launchExternalCdpContext)(
+        chromium, opts.browser, { headless: false }
+      ));
+    } else {
+      const hasDisplayOverrides = Object.keys(opts.browser.contextOptions ?? {}).some(key =>
+        ["viewport", "screen", "deviceScaleFactor", "userAgent"].includes(key)
+      );
+      if (opts.browser.identityProfile === undefined && opts.browser.profile === undefined && !hasDisplayOverrides) {
+        opts.browser = { ...opts.browser, identityProfile: "random" };
+      }
+      if (opts.browser.automationCompatibility === undefined) {
+        const engine = await selectBrowserType(chromium, opts.browser, dependencies.chromium ? dependencies : undefined);
+        if (engine === chromium) opts.browser = { ...opts.browser, automationCompatibility: true };
+      }
+      if (opts.browser.identityProfile === true || opts.browser.identityProfile === "random") {
+        opts.browser = validateBrowserConfig({ ...opts.browser, identityProfile: resolveIdentityProfile(opts.browser).id });
+      }
+      profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "prometheus-login-"));
+      const profile = resolveIdentityProfile(opts.browser || {});
+      const contextOpts = browserContextOptions(opts.browser);
+      if (profile?.userAgent && !contextOpts.userAgent) {
+        contextOpts.userAgent = profile.userAgent;
+      }
+      const browserType = await selectBrowserType(chromium, opts.browser, dependencies.chromium ? dependencies : undefined);
+      context = await browserType.launchPersistentContext(profileDir, { ...browserLaunchOptions(opts.browser, false), ...contextOpts });
+      if (opts.browser?.automationCompatibility) {
+        await applyAutomationCompatibility(context);
+      }
+      if (profile) {
+        await applyBrowserProfile(context, profile);
+      }
     }
-    profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "prometheus-login-"));
-    const profile = resolveIdentityProfile(opts.browser || {});
-    const contextOpts = browserContextOptions(opts.browser);
-    if (profile?.userAgent && !contextOpts.userAgent) {
-      contextOpts.userAgent = profile.userAgent;
-    }
-    const browserType = await selectBrowserType(chromium, opts.browser, dependencies.chromium ? dependencies : undefined);
-    context = await browserType.launchPersistentContext(profileDir, { ...browserLaunchOptions(opts.browser, false), ...contextOpts });
-    if (opts.browser?.automationCompatibility) {
-      await applyAutomationCompatibility(context);
-    }
-    if (profile) {
-      await applyBrowserProfile(context, profile);
-    }
-    if (closing) { await context.close(); fs.rmSync(profileDir, { recursive: true, force: true }); return; }
+    if (closing) { await closeBrowser(); if (profileDir) fs.rmSync(profileDir, { recursive: true, force: true }); return; }
     context.once("close", () => { void cleanup(); });
-    const page = context.pages()[0] ?? await context.newPage();
-    await page.goto(opts.url, { waitUntil: "domcontentloaded", timeout: OPERATION_TIMEOUT_MS });
+    // Never navigate an existing user's tab in an attached browser.
+    loginPage = cdpBrowser ? await context.newPage() : context.pages()[0] ?? await context.newPage();
+    if (closing) { await closeBrowser(); return; }
+    await loginPage.goto(opts.url, { waitUntil: "domcontentloaded", timeout: OPERATION_TIMEOUT_MS });
     ready = true;
     if (process.connected) process.send({ status: "awaiting-user", name: opts.name });
   } catch {

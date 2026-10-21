@@ -129,6 +129,24 @@ test("shared settings override inherited values and reject malformed files", asy
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test("humanize survives normalization and settings files take precedence over the environment", async () => {
+  for (const humanize of [true, false]) {
+    assert.equal(validateBrowserConfig({ channel: "default", humanize }).humanize, humanize);
+  }
+  assert.throws(() => validateBrowserConfig({ channel: "default", humanize: "true" }), /humanize/);
+  assert.equal(browserConfigFromEnv({ PROMETHEUS_BROWSER_HUMANIZE: "true" }).humanize, true);
+  assert.equal(browserConfigFromEnv({ PROMETHEUS_BROWSER_HUMANIZE: "false" }).humanize, false);
+  const dir = await mkdtemp(path.join(os.tmpdir(), "browser-humanize-"));
+  try {
+    for (const humanize of [true, false, undefined]) {
+      await writeFile(path.join(dir, "prometheus-browser.json"), JSON.stringify({ channel: "default", humanize }));
+      const config = browserConfigFromEnv({ PROMETHEUS_CONFIG_DIR: dir,
+        PROMETHEUS_BROWSER_HUMANIZE: humanize === true ? "false" : "true" });
+      assert.equal(config.humanize, humanize);
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("launch and context options are explicit, copied, and leave existing defaults unchanged", () => {
   assert.deepEqual(browserContextOptions({ channel: "default" }), { viewport: { width: 1280, height: 1024 } });
   const config = { channel: "chrome", automationCompatibility: true,
@@ -183,7 +201,22 @@ test("the task launch applies context settings and closes the browser if context
   const browser = { newContext: async options => { seen.context = options; return context; }, close: async () => { closed = true; } };
   const chromiumStub = { launch: async options => { seen.launch = options; return browser; } };
   const config = { channel: "default", contextOptions: { locale: "en-GB" }, launchOptions: { slowMo: 0 } };
-  assert.deepEqual(await createTaskContext(chromiumStub, config), { browser, context });
+  const res = await createTaskContext(chromiumStub, config);
+  assert.equal(res.browser, browser);
+  assert.equal(res.context, context);
+  assert.ok(res.runtime?.profile?.id);
+  assert.match(seen.context.userAgent, /^Mozilla\/5\.0/);
+  assert.doesNotMatch(seen.context.userAgent, /HeadlessChrome/);
+  assert.equal(seen.context.viewport.width, 1280);
+  assert.equal(seen.context.viewport.height, 1024);
+  assert.equal(seen.context.locale, "en-GB");
+  assert.deepEqual(seen.launch, {
+    slowMo: 0, headless: true,
+    ignoreDefaultArgs: ["--enable-automation"],
+    args: ["--disable-blink-features=AutomationControlled"],
+  });
+  const optOutConfig = { channel: "default", identityProfile: false, automationCompatibility: false, contextOptions: { locale: "en-GB" }, launchOptions: { slowMo: 0 } };
+  assert.deepEqual(await createTaskContext(chromiumStub, optOutConfig), { browser, context });
   assert.deepEqual(seen.context, { viewport: { width: 1280, height: 1024 }, locale: "en-GB" });
   assert.deepEqual(seen.launch, { slowMo: 0, headless: true });
   browser.newContext = async () => { throw new Error("fixture context failure"); };
@@ -237,4 +270,3 @@ test("external-cdp mode attaches through remote debugging and uses the existing 
     await browser.close();
   }
 });
-

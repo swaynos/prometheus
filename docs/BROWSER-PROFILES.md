@@ -11,6 +11,7 @@
 The upstream set includes Pixel, Galaxy, Fold/Flip cover displays, Android tablets,
 iPhone, iPad, legacy devices, and desktop Chromium, Edge, Firefox and WebKit presets.
 Landscape and cover-display entries are configurations, not additional physical devices.
+Windows host execution is not supported at this time; browser execution supports macOS and Linux.
 
 ## Inspect and select
 
