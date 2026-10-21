@@ -10,7 +10,7 @@ import { parse, modify, applyEdits } from 'jsonc-parser';
 import { browserConfigFromEnv, validateBrowserConfig } from './opencode-browser-runtime.mjs';
 
 const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const files = ['state', 'runtime', 'service', 'login'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs', 'browser-profiles.mjs');
+const files = ['state', 'runtime', 'service', 'login', 'humanize'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs', 'browser-profiles.mjs');
 const inventory = [...files, 'rules/resource-selection.md', 'docs/RESOURCE-SELECTION.md', 'docs/BROWSER-OPERATIONS.md', 'package.json', 'package-lock.json'];
 const historical = new Set([...inventory, 'docs/BROWSER-MIGRATION.md']);
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -81,7 +81,7 @@ function readReceipt(file, root) {
   if (receipt.version !== 2 || receipt.root !== root) throw new Error('Unsupported receipt or configuration root; reconcile manually');
   if (path.dirname(receipt.backup) !== path.join(root, 'prometheus-browser-backups') || !/^[a-f0-9-]{36}$/.test(path.basename(receipt.backup))) throw new Error('Unsafe backup path');
   safeRoot(receipt.backup);
-  if (!Array.isArray(receipt.files) || receipt.files.length !== inventory.length || new Set(receipt.files.map(x => x.name)).size !== inventory.length || receipt.files.some(x => !historical.has(x.name) || !/^[a-f0-9]{64}$/.test(x.after))) throw new Error('Invalid runtime inventory');
+  if (!Array.isArray(receipt.files) || receipt.files.length < 10 || receipt.files.length > inventory.length || new Set(receipt.files.map(x => x.name)).size !== receipt.files.length || receipt.files.some(x => !historical.has(x.name) || !/^[a-f0-9]{64}$/.test(x.after))) throw new Error('Invalid runtime inventory');
   if (!['opencode.json', 'opencode.jsonc'].some(name => receipt.config.file === path.join(root, name))) throw new Error('Unsafe configuration path');
   if (!Array.isArray(receipt.config.changes) || receipt.config.changes.some(x => {
     const keys = x.keys;

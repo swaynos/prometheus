@@ -42,7 +42,8 @@ filesystems. Do not flatten the two resource-selection files into one directory.
    `>=22.22.2 <25`. Run `npm ci` from the Prometheus repository root.
 2. Install the selected browser. For bundled Chromium, run
    `npx playwright install chromium`. For `channel: "chrome"`, install Google
-   Chrome. `virtual-display` requires Linux, Xvfb, `xvfb-run`, and `xauth`.
+   Chrome. Windows is not supported at this time; browser execution supports macOS and Linux.
+   `virtual-display` requires Linux, Xvfb, `xvfb-run`, and `xauth`.
 3. Inspect project and ancestor OpenCode configuration, agent definitions, command
    files, and custom rules for references to `cuddly-winner-browser` or
    `CUDDLY_WINNER_*`. Reconcile overrides in their owning projects. The installer

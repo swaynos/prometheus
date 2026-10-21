@@ -171,6 +171,27 @@ export function resolveBrowserProfile(selection) {
   return getBrowserProfile(undefined, selection);
 }
 
+export function currentHostOs(platform = process.platform) {
+  if (platform === "win32") {
+    throw new Error("Windows is not supported at this time; macOS and Linux are supported");
+  }
+  if (platform === "darwin") return "macOS";
+  if (platform === "linux") return "Linux";
+  throw new Error(`unsupported host platform: ${platform}; macOS and Linux are supported`);
+}
+
+export function getHostMatchedProfile({ seed, platform = process.platform, ...filters } = {}) {
+  const os = currentHostOs(platform);
+  return getBrowserProfile(undefined, {
+    seed,
+    os,
+    engine: "chromium",
+    deviceClass: "desktop",
+    legacy: false,
+    ...filters,
+  });
+}
+
 export function browserProfileInfo(id) {
   const profile = getBrowserProfile(id);
   return { ...structuredClone(profile), catalogVersion: PROFILE_CATALOG_VERSION, catalogSHA256: PROFILE_CATALOG_SHA256,

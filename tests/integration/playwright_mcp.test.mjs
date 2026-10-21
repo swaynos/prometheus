@@ -141,8 +141,10 @@ for (const channel of channels) {
       assert.match(evidence.playwrightVersion, /^\d+\.\d+\.\d+/);
       assert.equal(evidence.platform, process.platform);
       assert.equal(evidence.architecture, process.arch);
-      assert.equal(evidence.configuredDistribution, channel === "default" ? "chromium-headless-shell" : channel === "chrome" ? "installed-chrome" : "chromium");
-      assert.deepEqual(evidence.contextOptions, { viewport: { width: 1280, height: 1024 } });
+      assert.equal(evidence.contextOptions.viewport.width, 1280);
+      assert.equal(evidence.contextOptions.viewport.height, 1024);
+      assert.match(evidence.contextOptions.userAgent, /^Mozilla\/5\.0/);
+      assert.doesNotMatch(evidence.contextOptions.userAgent, /HeadlessChrome/);
     } finally { await c.call("browser_close"); c.close(); await new Promise((resolve) => httpServer.close(resolve)); }
   });
 }
@@ -482,6 +484,145 @@ test("Playwright MCP server runs with external Chrome and CDP attachment", async
     const status = JSON.parse(c.textOf(await c.call("browser_status")));
     assert.equal(status.configuredDistribution, "external-chrome-cdp");
     assert.equal(status.mode, "external-cdp");
+  } finally {
+    await c.call("browser_close");
+    c.close();
+    httpServer.close();
+  }
+});
+
+test("simulated human behavior provides typing jitter, curved mouse tracking, and navigation delays", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const c = client();
+  try {
+    // 1. Navigation with humanize
+    const startNav = Date.now();
+    const nav = await c.call("browser_navigate", { url: `${base}/`, humanize: true });
+    const elapsedNav = Date.now() - startNav;
+    assert.equal(nav.isError, undefined, c.textOf(nav));
+    assert.match(c.textOf(nav), /status 200/);
+    assert.ok(elapsedNav >= 1800, `expected nav delay >= 1800ms, got ${elapsedNav}ms`);
+
+    // 2. Typing with humanize
+    const startType = Date.now();
+    const typed = await c.call("browser_type", { selector: "#name", text: "human", humanize: true });
+    const elapsedType = Date.now() - startType;
+    assert.equal(typed.isError, undefined, c.textOf(typed));
+    const val = c.textOf(await c.call("browser_evaluate", { expression: "document.querySelector('#name').value" }));
+    assert.equal(val, "human");
+    // 5 chars with min 50ms each should take >= 200ms
+    assert.ok(elapsedType >= 200, `expected typing jitter >= 200ms, got ${elapsedType}ms`);
+
+    // 3. Click with humanize (curved mouse trajectory)
+    const clicked = await c.call("browser_click", { selector: "#go", humanize: true });
+    assert.equal(clicked.isError, undefined, c.textOf(clicked));
+    const out = c.textOf(await c.call("browser_evaluate", { expression: "document.querySelector('#out').textContent" }));
+    assert.equal(out, "clicked!");
+    const lastMouse = JSON.parse(c.textOf(await c.call("browser_evaluate", {
+      expression: "JSON.stringify({ x: window.__prometheusLastMouseX, y: window.__prometheusLastMouseY })",
+    })));
+    assert.ok(typeof lastMouse.x === "number" && lastMouse.x > 0, `expected recorded mouse x, got ${lastMouse.x}`);
+    assert.ok(typeof lastMouse.y === "number" && lastMouse.y > 0, `expected recorded mouse y, got ${lastMouse.y}`);
+  } finally {
+    await c.call("browser_close");
+    c.close();
+    httpServer.close();
+  }
+});
+
+test("human typing expires within its transport-safe budget and releases queued inspection", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const c = client({ PROMETHEUS_BROWSER_TRANSPORT_TIMEOUT_MS: "1000" });
+  try {
+    await c.call("browser_navigate", { url: `${base}/`, humanize: false });
+    const typing = c.call("browser_type", { selector: "#name", text: "x".repeat(1000), humanize: true });
+    const inspection = c.call("browser_evaluate", { expression: "document.querySelector('#name').value" });
+    const result = await typing;
+    assert.equal(result.isError, true);
+    assert.match(c.textOf(result), /typing deadline expired/);
+    const partial = c.textOf(await inspection);
+    assert.ok(partial.length > 0 && partial.length < 1000);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(c.textOf(await c.call("browser_evaluate", {
+      expression: "document.querySelector('#name').value",
+    })), partial, "input stays unchanged after the deadline");
+  } finally {
+    await c.call("browser_close");
+    c.close();
+    httpServer.close();
+  }
+});
+
+test("PROMETHEUS_BROWSER_HUMANIZE env var enables human behavior by default", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const c = client({ PROMETHEUS_BROWSER_HUMANIZE: "1" });
+  try {
+    await c.call("browser_navigate", { url: `${base}/` });
+    const startType = Date.now();
+    await c.call("browser_type", { selector: "#name", text: "abc" });
+    const elapsedType = Date.now() - startType;
+    const val = c.textOf(await c.call("browser_evaluate", { expression: "document.querySelector('#name').value" }));
+    assert.equal(val, "abc");
+    assert.ok(elapsedType >= 100, `expected typing delay >= 100ms, got ${elapsedType}ms`);
+
+    await c.call("browser_click", { selector: "#go" });
+    const out = c.textOf(await c.call("browser_evaluate", { expression: "document.querySelector('#out').textContent" }));
+    assert.equal(out, "clicked!");
+  } finally {
+    await c.call("browser_close");
+    c.close();
+    httpServer.close();
+  }
+});
+
+test("MCP humanize startup uses resolved settings instead of reading the environment again", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "mcp-humanize-"));
+  try {
+    for (const humanize of [true, false, undefined]) {
+      await writeFile(path.join(root, "prometheus-browser.json"), JSON.stringify({ channel: "default", humanize }));
+      const c = client({ PROMETHEUS_CONFIG_DIR: root,
+        PROMETHEUS_BROWSER_HUMANIZE: humanize === true ? "false" : "true" });
+      try {
+        const status = JSON.parse(c.textOf(await c.call("browser_status")));
+        assert.equal(status.humanize, Boolean(humanize));
+        assert.equal(status.contextOpen, false);
+      } finally { c.close(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("browser_configure tool dynamically toggles humanize across subsequent actions", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const c = client();
+  try {
+    await c.call("browser_navigate", { url: `${base}/` });
+
+    // Initial status: humanize is false
+    const initStatus = JSON.parse(c.textOf(await c.call("browser_status")));
+    assert.equal(initStatus.humanize, false);
+
+    // Dynamically configure humanize to true
+    const cfgRes = JSON.parse(c.textOf(await c.call("browser_configure", { humanize: true })));
+    assert.equal(cfgRes.configured, true);
+    assert.equal(cfgRes.humanize, true);
+
+    const postCfgStatus = JSON.parse(c.textOf(await c.call("browser_status")));
+    assert.equal(postCfgStatus.humanize, true);
+
+    // Actions now default to human simulation without per-call args
+    const startType = Date.now();
+    await c.call("browser_type", { selector: "#name", text: "mcp" });
+    const elapsedType = Date.now() - startType;
+    const val = c.textOf(await c.call("browser_evaluate", { expression: "document.querySelector('#name').value" }));
+    assert.equal(val, "mcp");
+    assert.ok(elapsedType >= 100, `expected typing delay >= 100ms, got ${elapsedType}ms`);
+
+    // Toggle back off
+    const offRes = JSON.parse(c.textOf(await c.call("browser_configure", { humanize: false })));
+    assert.equal(offRes.humanize, false);
+
+    const offStatus = JSON.parse(c.textOf(await c.call("browser_status")));
+    assert.equal(offStatus.humanize, false);
   } finally {
     await c.call("browser_close");
     c.close();

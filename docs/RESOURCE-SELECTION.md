@@ -40,6 +40,11 @@ it, `PROMETHEUS_BROWSER_CHANNEL`, `PROMETHEUS_BROWSER_EXECUTION_MODE`,
 Malformed settings fail before launch. Both task modes default to a 1280x1024
 viewport. Existing settings keep their behavior.
 
+Optional `humanize: true` enables simulated input timing at session startup.
+The default is false. Without a settings file, `PROMETHEUS_BROWSER_HUMANIZE`
+supplies this setting. A settings file takes precedence, including when it omits
+`humanize`. Per-action settings and `browser_configure` can change the session behavior.
+
 Optional `launchOptions` and `contextOptions` configure supported browser assembly
 settings without changing the execution mode or package versions:
 
@@ -196,6 +201,28 @@ A closed window cannot be captured or overwrite an existing record.
 Report a blocker if the required login has no graphical session, the browser
 cannot start, or saved state cannot be reused. Neither capture nor a redirect
 proves authentication. A challenge or access denial does not justify new login.
+
+### CDP login handoff
+
+When shared settings explicitly select `executionMode: "external-cdp"` (or its
+`"cdp"` alias), the login helper uses the shared CDP connection path rather than
+Playwright's persistent-context launcher. Without an endpoint, it starts a
+dedicated Chrome process in headed mode with remote debugging bound to loopback.
+With `cdpOptions.endpoint`, it attaches to that browser's existing context; the
+operator must provide a headed, dedicated automation browser, not an everyday
+personal profile. Attachment does not make an existing headless browser headed.
+
+The handoff opens a new login tab without navigating existing tabs. Completion or
+cancellation closes that tab and disconnects; an externally owned browser and its
+context remain open. A process launched by the helper is terminated on cleanup.
+Approved-origin state is still captured only after the person's explicit reply.
+CDP login does not select a random identity profile. Existing-context display
+settings are not recreated, and configured compatibility behavior remains shared
+with the CDP runtime. Attachment failures do not fall back to another launcher.
+
+This is an explicit workflow selection, not an automatic response to a challenge.
+Do not switch workflows or retry an access denial to bypass it. CDP support does
+not guarantee that a site will permit login.
 
 ## Login State
 
