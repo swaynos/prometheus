@@ -375,6 +375,8 @@ test('installed runtime starts with isolated dependencies and reuses migrated st
     storageState: { cookies: [], origins: [{ origin, localStorage: [{ name: 'fixture', value: 'approved' }] }] }, verification: { selector: '#account' } });
   // Exercise the actual npm preparation and real blank-page readiness launch, not the test hooks.
   profile('install', { root: f.root, quiescent: true, migrate: true });
+  write(path.join(f.root, 'prometheus-browser.json'), { channel: process.env.PROMETHEUS_TEST_BROWSER_CHANNEL || 'default', executionMode: 'headless',
+    launchOptions: { slowMo: 0 }, contextOptions: { viewport: { width: 1440, height: 900 }, locale: 'en-GB' } });
   assert.equal(profile('install', { root: f.root, quiescent: true }).unchanged, true);
   const entry = f.value().mcp.servers[newName];
   const child = spawn(entry.command[0], entry.command.slice(1), { cwd: f.directory, env: { ...process.env, ...entry.environment }, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -401,11 +403,17 @@ test('installed runtime starts with isolated dependencies and reuses migrated st
   }
   try {
     assert.equal((await rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {} })).result.serverInfo.name, newName);
+    // Measure display settings before private saved state disables arbitrary evaluation.
+    await call('browser_navigate', { url: 'about:blank' });
+    assert.equal(await call('browser_evaluate', { expression: 'String(innerWidth)' }), '1440');
     await call('browser_navigate', { url: origin });
     assert.match(await call('browser_snapshot'), /Migration fixture account/);
     const status = JSON.parse(await call('browser_status'));
     assert.equal(status.hydratedAuthentication, true);
     assert.equal(status.mode, 'headless');
+    assert.equal(status.playwrightVersion, '1.63.0');
+    assert.deepEqual(status.contextOptions, { viewport: { width: 1440, height: 900 }, locale: 'en-GB' });
+    assert.equal(status.launchOptions.slowMo, 0);
     const upload = path.join(f.directory, 'input.png');
     fs.writeFileSync(upload, Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489', 'hex'));
     const attached = JSON.parse(await call('browser_upload_image', { selector: '#upload', path: upload }));

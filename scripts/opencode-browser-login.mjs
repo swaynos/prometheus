@@ -34,7 +34,7 @@ import {
   removeState,
 } from "./opencode-browser-state.mjs";
 
-import { browserLaunchOptions, browserConfigFromEnv } from "./opencode-browser-runtime.mjs";
+import { browserLaunchOptions, browserContextOptions, browserConfigFromEnv } from "./opencode-browser-runtime.mjs";
 
 const OPERATION_TIMEOUT_MS = 30_000;
 
@@ -329,7 +329,7 @@ export async function serveLogin(opts, dependencies = {}) {
     });
     const { chromium } = dependencies.chromium ? dependencies : await import("playwright");
     profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "prometheus-login-"));
-    context = await chromium.launchPersistentContext(profileDir, browserLaunchOptions(opts.browser, false));
+    context = await chromium.launchPersistentContext(profileDir, { ...browserLaunchOptions(opts.browser, false), ...browserContextOptions(opts.browser) });
     if (closing) { await context.close(); fs.rmSync(profileDir, { recursive: true, force: true }); return; }
     context.once("close", () => { void cleanup(); });
     const page = context.pages()[0] ?? await context.newPage();
