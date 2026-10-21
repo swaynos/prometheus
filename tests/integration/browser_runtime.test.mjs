@@ -4,7 +4,7 @@ import { chromium } from "playwright";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createTaskContext, hydrateBrowserState, browserLaunchOptions, browserContextOptions, browserRuntimeInfo, validateBrowserConfig, browserConfigFromEnv } from "../../scripts/opencode-browser-runtime.mjs";
+import { createTaskContext, hydrateBrowserState, browserLaunchOptions, browserContextOptions, browserRuntimeInfo, validateBrowserConfig, browserConfigFromEnv, applyAutomationCompatibility } from "../../scripts/opencode-browser-runtime.mjs";
 
 const channels = [...new Set(["default", "chromium", process.env.PROMETHEUS_TEST_BROWSER_CHANNEL].filter(Boolean))];
 
@@ -51,6 +51,22 @@ test("automation compatibility is opt-in and shared by headed and headless launc
   assert.throws(() => validateBrowserConfig({ channel: "chrome", automationCompatibility: "true" }));
   assert.deepEqual(browserConfigFromEnv({ PROMETHEUS_BROWSER_AUTOMATION_COMPATIBILITY: "true" }), { channel: "default", automationCompatibility: true });
   assert.throws(() => browserConfigFromEnv({ PROMETHEUS_BROWSER_AUTOMATION_COMPATIBILITY: "yes" }));
+});
+
+test("automation compatibility hides navigator.webdriver so page scripts receive undefined", async () => {
+  const { browser, context } = await createTaskContext(chromium, { channel: "default", automationCompatibility: true });
+  try {
+    const page = await context.newPage();
+    await page.goto("about:blank");
+    const result = await page.evaluate(() => ({
+      webdriver: navigator.webdriver,
+      inNav: "webdriver" in navigator,
+    }));
+    assert.equal(result.webdriver, undefined);
+    assert.equal(result.inNav, false);
+  } finally {
+    await browser.close();
+  }
 });
 
 test("shared settings override inherited values and reject malformed files", async () => {
