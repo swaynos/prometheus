@@ -7,7 +7,8 @@
     "test": "node --test --test-concurrency=2 tests/integration/*.test.mjs",
     "test:controller": "npm --prefix packages/prometheus test",
     "test:controller:native": "npm --prefix packages/prometheus run test:native",
-    "browser": "node scripts/browser-profile.mjs"
+    "browser": "node scripts/browser-profile.mjs",
+    "browser:profiles": "node scripts/browser-profiles.mjs"
   },
   "dependencies": {
     "jsonc-parser": "3.3.1",

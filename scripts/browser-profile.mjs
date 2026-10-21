@@ -10,7 +10,7 @@ import { parse, modify, applyEdits } from 'jsonc-parser';
 import { browserConfigFromEnv, validateBrowserConfig } from './opencode-browser-runtime.mjs';
 
 const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const files = ['state', 'runtime', 'service', 'login'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs');
+const files = ['state', 'runtime', 'service', 'login'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs', 'browser-profiles.mjs');
 const inventory = [...files, 'rules/resource-selection.md', 'docs/RESOURCE-SELECTION.md', 'docs/BROWSER-OPERATIONS.md', 'package.json', 'package-lock.json'];
 const historical = new Set([...inventory, 'docs/BROWSER-MIGRATION.md']);
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');

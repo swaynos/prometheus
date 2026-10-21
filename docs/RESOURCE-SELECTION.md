@@ -31,10 +31,11 @@ defaults to false. When enabled, compatibility mode omits `--enable-automation`,
 adds `--disable-blink-features=AutomationControlled`, hides the automation
 property by changing `navigator.webdriver` so page scripts receive `undefined`,
 and sets `navigator.languages` to `['en-US', 'en']` and `navigator.plugins` to
-`[1, 2, 3, 4, 5]`. It adds no user-agent spoofing.
+`[1, 2, 3, 4, 5]`. Optional `profile` selects a source-backed device/desktop emulation preset, with an explicit ID or seeded filters. Optional `identityProfile` retains the legacy JavaScript-only identity experiments; these are not verified coherent hardware identities. See the repository's `docs/BROWSER-PROFILES.md` for the catalog, engine requirements, reproducibility, and limitations.
 
 The settings file takes precedence over inherited environment values. Without
-it, `PROMETHEUS_BROWSER_CHANNEL`, `PROMETHEUS_BROWSER_EXECUTION_MODE`, and
+it, `PROMETHEUS_BROWSER_CHANNEL`, `PROMETHEUS_BROWSER_EXECUTION_MODE`,
+`PROMETHEUS_BROWSER_IDENTITY_PROFILE`, and
 `PROMETHEUS_BROWSER_AUTOMATION_COMPATIBILITY=true|false` supply these settings.
 Malformed settings fail before launch. Both task modes default to a 1280x1024
 viewport. Existing settings keep their behavior.
@@ -162,9 +163,9 @@ is fixed, not random. Its default remains 0. Use it when the application require
 spaced keyboard events. The existing action timeout still applies. After an
 interrupted typing action, inspect the field before adding more text.
 
-`browser_fill` is unchanged. No automatic mouse-path simulation, user-agent
-spoofing, or WebGL override is installed beyond the opt-in `navigator.webdriver`,
-`navigator.languages`, and `navigator.plugins` overrides.
+`browser_fill` is unchanged. No automatic mouse-path simulation is installed
+beyond the opt-in `navigator.webdriver`, `navigator.languages`, `navigator.plugins`,
+and configured `identityProfile` overrides.
 
 ## Browser Actions And Login
 

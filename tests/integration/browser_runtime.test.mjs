@@ -73,6 +73,44 @@ test("automation compatibility hides navigator.webdriver and overrides languages
   }
 });
 
+test("identityProfile configuration validates profile IDs and parses environment", () => {
+  assert.equal(validateBrowserConfig({ channel: "default", identityProfile: "win-chrome-124-intel" }).identityProfile, "win-chrome-124-intel");
+  assert.equal(validateBrowserConfig({ channel: "default", identityProfile: true }).identityProfile, true);
+  assert.equal(validateBrowserConfig({ channel: "default", identityProfile: "random" }).identityProfile, "random");
+  assert.throws(() => validateBrowserConfig({ channel: "default", identityProfile: "invalid-profile" }));
+  assert.throws(() => validateBrowserConfig({ channel: "default", identityProfile: 123 }));
+  assert.equal(browserConfigFromEnv({ PROMETHEUS_BROWSER_IDENTITY_PROFILE: "win-chrome-124-intel" }).identityProfile, "win-chrome-124-intel");
+  assert.equal(browserConfigFromEnv({ PROMETHEUS_BROWSER_IDENTITY_PROFILE: "true" }).identityProfile, true);
+});
+
+test("identity profile sets coherent user agent, platform, and WebGL vendor and renderer", async () => {
+  const { browser, context } = await createTaskContext(chromium, {
+    channel: "default",
+    identityProfile: "win-chrome-124-intel",
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto("about:blank");
+    const result = await page.evaluate(() => {
+      const canvas = document.createElement("canvas");
+      const gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+      const debugInfo = gl?.getExtension("WEBGL_debug_renderer_info");
+      return {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        glVendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : null,
+        glRenderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : null,
+      };
+    });
+    assert.match(result.userAgent, /Windows NT 10\.0; Win64; x64.*Chrome\/124/);
+    assert.equal(result.platform, "Win32");
+    assert.equal(result.glVendor, "Intel Inc.");
+    assert.equal(result.glRenderer, "Intel(R) Iris(R) Xe Graphics");
+  } finally {
+    await browser.close();
+  }
+});
+
 test("shared settings override inherited values and reject malformed files", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "browser-profile-"));
   try {
@@ -113,12 +151,21 @@ test("invalid context settings fail before a browser can start", async () => {
     { viewport: { width: 10, height: 16385 } }, { screen: { width: 10 } }, { viewport: null, deviceScaleFactor: 2 },
     { viewport: null, screen: { width: 10, height: 10 } }, { deviceScaleFactor: 0 }, { deviceScaleFactor: 9 },
     { locale: "not_a_locale" }, { locale: [] }, { timezoneId: "No/Such_Zone" }, { timezoneId: 10 },
-    { colorScheme: "auto" }, { reducedMotion: true }, { userAgent: "not accepted" }, { storageState: {} }];
+    { colorScheme: "auto" }, { reducedMotion: true }, { userAgent: "" }, { userAgent: 123 }, { arbitraryOption: "not accepted" }, { storageState: {} }];
   let launched = false;
   for (const contextOptions of invalid) {
     await assert.rejects(createTaskContext({ launch() { launched = true; } }, { channel: "default", contextOptions }));
   }
   assert.equal(launched, false);
+});
+
+test("contextOptions accepts valid userAgent overrides and passes them to context", async () => {
+  const seen = {};
+  const browser = { newContext: async options => { seen.context = options; return {}; } };
+  const chromiumStub = { launch: async () => browser };
+  const config = { channel: "default", contextOptions: { userAgent: "Mozilla/5.0 CustomResearchAgent/1.0" } };
+  await createTaskContext(chromiumStub, config);
+  assert.equal(seen.context.userAgent, "Mozilla/5.0 CustomResearchAgent/1.0");
 });
 
 test("launch settings reject arbitrary arguments, credentials, and unbounded delays", () => {
