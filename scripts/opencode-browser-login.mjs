@@ -34,7 +34,7 @@ import {
   removeState,
 } from "./opencode-browser-state.mjs";
 
-import { browserLaunchOptions, browserContextOptions, browserConfigFromEnv, applyAutomationCompatibility } from "./opencode-browser-runtime.mjs";
+import { browserLaunchOptions, browserContextOptions, browserConfigFromEnv, applyAutomationCompatibility, applyBrowserProfile, resolveIdentityProfile, selectBrowserType, validateBrowserConfig } from "./opencode-browser-runtime.mjs";
 
 const OPERATION_TIMEOUT_MS = 30_000;
 
@@ -328,10 +328,22 @@ export async function serveLogin(opts, dependencies = {}) {
       });
     });
     const { chromium } = dependencies.chromium ? dependencies : await import("playwright");
+    if (opts.browser.identityProfile === true || opts.browser.identityProfile === "random") {
+      opts.browser = validateBrowserConfig({ ...opts.browser, identityProfile: resolveIdentityProfile(opts.browser).id });
+    }
     profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "prometheus-login-"));
-    context = await chromium.launchPersistentContext(profileDir, { ...browserLaunchOptions(opts.browser, false), ...browserContextOptions(opts.browser) });
+    const profile = resolveIdentityProfile(opts.browser || {});
+    const contextOpts = browserContextOptions(opts.browser);
+    if (profile?.userAgent && !contextOpts.userAgent) {
+      contextOpts.userAgent = profile.userAgent;
+    }
+    const browserType = await selectBrowserType(chromium, opts.browser, dependencies.chromium ? dependencies : undefined);
+    context = await browserType.launchPersistentContext(profileDir, { ...browserLaunchOptions(opts.browser, false), ...contextOpts });
     if (opts.browser?.automationCompatibility) {
       await applyAutomationCompatibility(context);
+    }
+    if (profile) {
+      await applyBrowserProfile(context, profile);
     }
     if (closing) { await context.close(); fs.rmSync(profileDir, { recursive: true, force: true }); return; }
     context.once("close", () => { void cleanup(); });

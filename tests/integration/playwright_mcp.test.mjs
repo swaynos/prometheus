@@ -374,6 +374,35 @@ test("configured context options reach the page and metadata does not start a br
   } finally { await c.call("browser_close"); c.close(); httpServer.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("profile metadata and emulation survive the full MCP lifecycle", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const root = await mkdtemp(path.join(os.tmpdir(), "prometheus-profile-"));
+  await writeFile(path.join(root, "prometheus-browser.json"), JSON.stringify({ channel: "default",
+    profile: { seed: "mcp-campaign", engine: "chromium", os: "Android", orientation: "portrait", legacy: false } }));
+  const c = client({ PROMETHEUS_CONFIG_DIR: root });
+  try {
+    const before = JSON.parse(c.textOf(await c.call("browser_status")));
+    assert.equal(before.contextOpen, false);
+    assert.equal(before.browserVersion, null);
+    assert.match(before.profile.catalogSHA256, /^[a-f0-9]{64}$/);
+    assert.equal(before.profile.engine, "chromium");
+    const nav = await c.call("browser_navigate", { url: base });
+    assert.equal(nav.isError, undefined, c.textOf(nav));
+    const after = JSON.parse(c.textOf(await c.call("browser_status")));
+    assert.equal(after.profile.id, before.profile.id);
+    assert.equal(typeof after.browserVersion, "string");
+    const observed = JSON.parse(c.textOf(await c.call("browser_evaluate", { expression: "JSON.stringify({ua:navigator.userAgent, touch:navigator.maxTouchPoints, scale:devicePixelRatio})" })));
+    assert.equal(observed.ua, before.profile.userAgent);
+    assert.equal(observed.scale, before.profile.contextOptions.deviceScaleFactor);
+    assert.ok(observed.touch > 0);
+    await c.call("browser_close");
+    const closed = JSON.parse(c.textOf(await c.call("browser_status")));
+    assert.equal(closed.contextOpen, false);
+    assert.equal(closed.profile.id, before.profile.id);
+    assert.equal(closed.browserVersion, null);
+  } finally { await c.call("browser_close"); c.close(); httpServer.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("navigation waits for an explicit application signal and preserves the page on timeout", async () => {
   const { httpServer, base } = await fixtureServer();
   const c = client();
@@ -459,4 +488,3 @@ test("Playwright MCP server runs with external Chrome and CDP attachment", async
     httpServer.close();
   }
 });
-

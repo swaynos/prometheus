@@ -110,6 +110,7 @@ const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
 let chromium = null;
 let browser = null;
 let context = null;
+let resolvedRuntime = null;
 let pages = []; // ordered list of Page
 let activeIndex = 0;
 const consoleMessages = [];
@@ -132,7 +133,7 @@ function registerPage(page) {
 async function ensureContext() {
   if (context) return context;
   await ensureChromium();
-  ({ browser, context } = await createTaskContext(chromium, TASK_CONFIG));
+  ({ browser, context, runtime: resolvedRuntime } = await createTaskContext(chromium, TASK_CONFIG));
   context.setDefaultTimeout(DEFAULT_TIMEOUT);
   pages = [];
   context.on("page", registerPage);
@@ -469,7 +470,7 @@ const HANDLERS = {
     return text({
       runtime: SERVER_INFO.name,
       version: SERVER_INFO.version,
-      ...browserRuntimeInfo(TASK_CONFIG),
+      ...(context && resolvedRuntime ? resolvedRuntime : browserRuntimeInfo(TASK_CONFIG)),
       mode: TASK_CONFIG.executionMode || "headless",
       virtualDisplay: TASK_CONFIG.executionMode === "virtual-display" ? process.env.DISPLAY : null,
       launchOptions: browserLaunchOptions(TASK_CONFIG),

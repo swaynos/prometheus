@@ -241,3 +241,10 @@ This update did not change package versions, the active global browser settings,
 saved accounts, workflow rules, or active services. The active installation still
 requires a quiescent installer update and an OpenCode restart. No denied public
 site was retried, and no Cloudflare access fix is claimed.
+## Research profile selection
+
+The runtime supports 241 source-backed or explicitly labeled synthetic/legacy
+presets. Set `profile` to an ID such as `pw-pixel-7` in the shared browser settings,
+or use seeded filters for reproducible sampling. Browse the catalog with
+`npm run browser:profiles -- list`. See [BROWSER-PROFILES.md](BROWSER-PROFILES.md)
+in the source repository for configuration, engine requirements and identity limitations.

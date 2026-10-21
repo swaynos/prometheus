@@ -13,7 +13,7 @@ import { profile } from '../../scripts/browser-profile.mjs';
 
 const repo = path.resolve(import.meta.dirname, '../..');
 const moduleURL = pathToFileURL(path.join(repo, 'scripts/browser-profile.mjs')).href;
-const runtimeNames = ['state', 'runtime', 'service', 'login'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs');
+const runtimeNames = ['state', 'runtime', 'service', 'login'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs', 'browser-profiles.mjs');
 const oldName = 'cuddly-winner-browser';
 const newName = 'prometheus-browser';
 function fixture(t) {
