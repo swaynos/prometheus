@@ -53,7 +53,7 @@ test("automation compatibility is opt-in and shared by headed and headless launc
   assert.throws(() => browserConfigFromEnv({ PROMETHEUS_BROWSER_AUTOMATION_COMPATIBILITY: "yes" }));
 });
 
-test("automation compatibility hides navigator.webdriver so page scripts receive undefined", async () => {
+test("automation compatibility hides navigator.webdriver and overrides languages and plugins", async () => {
   const { browser, context } = await createTaskContext(chromium, { channel: "default", automationCompatibility: true });
   try {
     const page = await context.newPage();
@@ -61,9 +61,13 @@ test("automation compatibility hides navigator.webdriver so page scripts receive
     const result = await page.evaluate(() => ({
       webdriver: navigator.webdriver,
       inNav: "webdriver" in navigator,
+      languages: navigator.languages,
+      plugins: Array.from(navigator.plugins),
     }));
     assert.equal(result.webdriver, undefined);
     assert.equal(result.inNav, false);
+    assert.deepEqual(result.languages, ["en-US", "en"]);
+    assert.deepEqual(result.plugins, [1, 2, 3, 4, 5]);
   } finally {
     await browser.close();
   }
