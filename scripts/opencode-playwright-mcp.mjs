@@ -33,7 +33,7 @@ import { lstat, mkdir, writeFile, open, realpath } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { loadStateForOrigin, listStates } from "./opencode-browser-state.mjs";
-import { browserConfigFromEnv, browserLaunchOptions, createTaskContext, hydrateBrowserState } from "./opencode-browser-runtime.mjs";
+import { browserConfigFromEnv, browserLaunchOptions, browserRuntimeInfo, createTaskContext, hydrateBrowserState } from "./opencode-browser-runtime.mjs";
 import { enterTaskDisplay } from "./opencode-browser-service.mjs";
 
 // Re-exec the actual MCP service, not its caller, inside an isolated display.
@@ -60,7 +60,7 @@ const STATE_NAMES = (process.env.PROMETHEUS_BROWSER_STATES || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-const SERVER_INFO = { name: "prometheus-browser", version: "1.0.0" };
+const SERVER_INFO = { name: "prometheus-browser", version: "1.1.0" };
 const PROTOCOL_VERSION = "2024-11-05";
 
 // --- Tool surface ----------------------------------------------------------
@@ -69,7 +69,7 @@ const PROTOCOL_VERSION = "2024-11-05";
 // path, never through a model-visible tool.
 
 const TOOLS = [
-  { name: "browser_navigate", description: "Navigate to a URL and wait for load.", inputSchema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
+  { name: "browser_navigate", description: "Navigate to a URL. Optionally select a load event and wait for a visible readiness selector without fixed sleeps.", inputSchema: { type: "object", properties: { url: { type: "string" }, wait_until: { type: "string", enum: ["commit", "domcontentloaded", "load", "networkidle"] }, ready_selector: { type: "string" }, timeout: { type: "number", description: "Total navigation/readiness budget in seconds, bounded by the transport budget." } }, required: ["url"] } },
   { name: "browser_status", description: "Return non-secret browser runtime and page health metadata.", inputSchema: { type: "object", properties: {} } },
   { name: "browser_navigate_back", description: "Go back in history.", inputSchema: { type: "object", properties: {} } },
   { name: "browser_forward", description: "Go forward in history.", inputSchema: { type: "object", properties: {} } },
@@ -80,7 +80,7 @@ const TOOLS = [
   { name: "browser_links", description: "List anchor links as {text, href}.", inputSchema: { type: "object", properties: { limit: { type: "number" } } } },
   { name: "browser_click", description: "Click an element by ref or selector.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" } } } },
   { name: "browser_fill", description: "Set the value of an input by ref or selector.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, value: { type: "string" } }, required: ["value"] } },
-  { name: "browser_type", description: "Type text into an input (appends).", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, text: { type: "string" } }, required: ["text"] } },
+  { name: "browser_type", description: "Type text into an input (appends). Optional fixed delay_ms supports interfaces that need spaced keyboard events; default 0.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, text: { type: "string" }, delay_ms: { type: "number", minimum: 0, maximum: 1000 } }, required: ["text"] } },
   { name: "browser_fill_form", description: "Fill multiple fields, optionally submit.", inputSchema: { type: "object", properties: { fields: { type: "array" }, submit_ref: { type: "string" }, submit_selector: { type: "string" } }, required: ["fields"] } },
   { name: "browser_select_option", description: "Select an option in a <select>.", inputSchema: { type: "object", properties: { selector: { type: "string" }, value: { type: "string" } }, required: ["selector", "value"] } },
   { name: "browser_press_key", description: "Dispatch a keyboard key.", inputSchema: { type: "object", properties: { key: { type: "string" }, selector: { type: "string" } }, required: ["key"] } },
@@ -136,8 +136,12 @@ async function ensureContext() {
   context.setDefaultTimeout(DEFAULT_TIMEOUT);
   pages = [];
   context.on("page", registerPage);
-  const page = await context.newPage();
-  registerPage(page);
+  const existing = typeof context.pages === "function" ? context.pages() : [];
+  if (existing.length) {
+    for (const p of existing) registerPage(p);
+  } else {
+    registerPage(await context.newPage());
+  }
   activeIndex = 0;
   return context;
 }
@@ -362,18 +366,22 @@ function boundedWaitMs(seconds) {
   return Math.min(requested, MAX_WAIT_MS);
 }
 
-async function navigationClassification(page, status) {
-  if (status !== 401 && status !== 403) return status && status >= 400 ? ", HTTP error" : "";
+async function navigationClassification(page, status, timeout = DEFAULT_TIMEOUT) {
+  const denied = status === 401 || status === 403;
   try {
     const title = await page.title();
-    const body = await page.locator("body").innerText({ timeout: DEFAULT_TIMEOUT });
-    if (/cloudflare|just a moment|checking your browser|verify you are human/i.test(`${title}\n${body}`)) {
+    const challengeTitle = /^(?:just a moment[.!\s…]*|checking your browser.*|attention required.*cloudflare.*|verify (?:that )?you are human[.!\s]*)$/i.test(title.trim());
+    // Do not classify an ordinary page merely because it mentions Cloudflare.
+    if (!denied && !challengeTitle) return status && status >= 400 ? ", HTTP error" : "";
+    const body = await page.locator("body").innerText({ timeout: Math.max(1, Math.min(timeout, 1000)) });
+    const challengeBody = /checking your browser|verify (?:that )?you are human|performing security verification|enable javascript and cookies to continue/i.test(body);
+    if (denied ? /cloudflare|just a moment|checking your browser|verify you are human/i.test(`${title}\n${body}`) : challengeTitle && challengeBody) {
       return ", Cloudflare challenge detected; do not retry automatically";
     }
   } catch {
     /* Preserve the HTTP classification when the denial page cannot be read. */
   }
-  return ", access denied";
+  return denied ? ", access denied" : status && status >= 400 ? ", HTTP error" : "";
 }
 
 // --- Tool handlers ---------------------------------------------------------
@@ -461,6 +469,7 @@ const HANDLERS = {
     return text({
       runtime: SERVER_INFO.name,
       version: SERVER_INFO.version,
+      ...browserRuntimeInfo(TASK_CONFIG),
       mode: TASK_CONFIG.executionMode || "headless",
       virtualDisplay: TASK_CONFIG.executionMode === "virtual-display" ? process.env.DISPLAY : null,
       launchOptions: browserLaunchOptions(TASK_CONFIG),
@@ -481,13 +490,30 @@ const HANDLERS = {
   },
   async browser_navigate(args) {
     if (typeof args.url !== "string") throw new Error("url is required");
+    const waitUntil = args.wait_until === undefined ? "load" : args.wait_until;
+    if (!["commit", "domcontentloaded", "load", "networkidle"].includes(waitUntil)) throw new Error("invalid wait_until");
+    if (args.ready_selector !== undefined && (typeof args.ready_selector !== "string" || !args.ready_selector.trim())) throw new Error("ready_selector must be nonempty text");
+    const budget = args.timeout !== undefined || args.ready_selector !== undefined ? boundedWaitMs(args.timeout) : DEFAULT_TIMEOUT;
     await ensureContext();
     const hydration = await maybeHydrate(args.url);
     const page = await ensureActivePage();
-    const resp = await page.goto(args.url, { waitUntil: "load" });
-    await verifyHydratedAccount(page, hydration);
+    const started = Date.now();
+    const remaining = () => Math.max(1, budget - (Date.now() - started));
+    const resp = await page.goto(args.url, { waitUntil, timeout: budget });
     const status = resp ? resp.status() : null;
-    const classification = await navigationClassification(page, status);
+    let classification = await navigationClassification(page, status, remaining());
+    if (!classification && args.ready_selector !== undefined) {
+      try { await page.locator(args.ready_selector).first().waitFor({ state: "visible", timeout: remaining() }); }
+      catch (error) {
+        classification = await navigationClassification(page, status, remaining());
+        if (!classification) {
+          if (error?.name !== "TimeoutError") throw error;
+          throw new Error(`navigation readiness wait expired after ${budget}ms; the page remains open`);
+        }
+      }
+    }
+    // A denied page is not evidence that saved credentials need replacement.
+    if (!classification) await verifyHydratedAccount(page, hydration);
     return text(`navigated to ${page.url()} (status ${status ?? "n/a"}${classification})${hydration?.method === "user-confirmed" ? "; user-confirmed state loaded: verify account or requested task access in this context before claiming login success" : ""}`);
   },
   async browser_navigate_back() {
@@ -553,10 +579,12 @@ const HANDLERS = {
   },
   async browser_type(args) {
     if (typeof args.text !== "string") throw new Error("text is required");
+    const delay = args.delay_ms === undefined ? 0 : args.delay_ms;
+    if (!Number.isFinite(delay) || delay < 0 || delay > 1000) throw new Error("delay_ms must be from 0 to 1000 milliseconds");
     const page = activePage();
     const locator = locatorFor(page, args).first();
     await assertActionable(locator, "type");
-    await locator.pressSequentially(args.text, { timeout: DEFAULT_TIMEOUT });
+    await locator.pressSequentially(args.text, { delay, timeout: DEFAULT_TIMEOUT });
     return text(`typed at ${page.url()}`);
   },
   async browser_fill_form(args) {

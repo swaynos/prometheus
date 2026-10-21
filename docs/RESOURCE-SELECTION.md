@@ -34,7 +34,57 @@ browsers. It adds no JavaScript webdriver override or user-agent spoofing.
 The settings file takes precedence over inherited environment values. Without
 it, `PROMETHEUS_BROWSER_CHANNEL`, `PROMETHEUS_BROWSER_EXECUTION_MODE`, and
 `PROMETHEUS_BROWSER_AUTOMATION_COMPATIBILITY=true|false` supply these settings.
-Malformed settings fail before launch. Both task modes use a 1280x1024 viewport.
+Malformed settings fail before launch. Both task modes default to a 1280x1024
+viewport. Existing settings keep their behavior.
+
+Optional `launchOptions` and `contextOptions` configure supported browser assembly
+settings without changing the execution mode or package versions:
+
+```json
+{
+  "channel": "chrome",
+  "executionMode": "headless",
+  "launchOptions": { "slowMo": 0, "timeout": 15000 },
+  "contextOptions": {
+    "viewport": { "width": 1440, "height": 900 },
+    "screen": { "width": 1440, "height": 1000 },
+    "deviceScaleFactor": 1,
+    "locale": "en-GB",
+    "timezoneId": "Europe/London",
+    "colorScheme": "light",
+    "reducedMotion": "no-preference"
+  }
+}
+```
+
+Use these options for the application's display and timing requirements. Do not
+change them to retry an access denial. Unspecified options keep Playwright's
+defaults. The task browser and the human login browser use the same configured
+context options. The human login window remains headed.
+
+| Setting | Accepted values |
+| --- | --- |
+| `launchOptions.chromiumSandbox` | Boolean; omitted by default. |
+| `launchOptions.slowMo` | Fixed operation delay, 0–1000 milliseconds; omitted by default. |
+| `launchOptions.timeout` | Browser startup timeout, 1–120000 whole milliseconds. The installer probe still has a 30-second limit. |
+| `contextOptions.viewport` | Width and height, each 1–16384 whole pixels; or `null` to use the host window size. |
+| `contextOptions.screen` | Width and height, each 1–16384 whole pixels. |
+| `contextOptions.deviceScaleFactor` | Number greater than 0 and at most 8. |
+| `contextOptions.locale` | Valid language tag. |
+| `contextOptions.timezoneId` | Valid timezone name. |
+| `contextOptions.colorScheme` | `light`, `dark`, `no-preference`, or `null` for system defaults. |
+| `contextOptions.reducedMotion` | `reduce`, `no-preference`, or `null` for system defaults. |
+
+`screen` and `deviceScaleFactor` require a fixed viewport. Display options emulate
+page-visible geometry; they do not change the Linux Xvfb screen. Arbitrary launch
+arguments, user-agent overrides, proxy credentials, and raw storage state are not
+accepted in these option objects. Approved saved state still uses the private
+origin-scoped restoration path.
+
+`channel: "chrome"` uses installed Chrome. Current Chrome uses modern headless
+with Playwright's `--headless` argument. `channel: "chromium"` selects full bundled
+Chromium. An omitted/default channel selects the separate headless shell in
+headless mode. These are different executable selections, not just window flags.
 
 Install dependencies and the selected browser from the repository root first:
 
@@ -56,7 +106,11 @@ The `--quiescent` flag records your assertion. It does not detect active work.
 The installer preserves the shared settings file. Restart OpenCode after changes
 to runtime files, settings, or agent instructions. MCP configuration reports
 `configured`; `browser_status` reports the selected execution mode, applied launch
-options, browser version, virtual display, and page health.
+options, browser version, virtual display, and page health. It also reports the
+Playwright and Node versions, platform, architecture, configured distribution,
+and context options. Status does not launch a browser. The browser version is
+`null` until a browser is running. Reported launch options are the wrapper's
+explicit options, not the full list of Playwright's internal Chromium arguments.
 
 For an existing `cuddly-winner-browser` registration, add `--migrate`. See the
 [operations and recovery guide](BROWSER-OPERATIONS.md) in the source checkout for
@@ -80,6 +134,34 @@ without using the physical desktop or switching modes.
 Xvfb and compatibility settings do not guarantee site access. Never switch modes
 or retry a denied request automatically. Human login still opens on the person's
 physical desktop, not inside the task display.
+
+## Page Readiness And Input Timing
+
+`browser_navigate` keeps `wait_until: "load"` as its default. Agents can choose
+`commit`, `domcontentloaded`, `load`, or `networkidle`. A page with continuous
+network activity may never reach `networkidle`.
+
+Use `ready_selector` when the application has a visible readiness signal. The
+optional `timeout` is in seconds. The navigation and selector wait share that
+budget, capped by the existing transport-safe wait limit. No fixed post-navigation
+sleep is added. A readiness timeout leaves the page open for inspection.
+
+```json
+{
+  "url": "https://example.com/",
+  "wait_until": "domcontentloaded",
+  "ready_selector": "#application-ready",
+  "timeout": 10
+}
+```
+
+`browser_type` accepts optional `delay_ms` from 0 to 1000 milliseconds. The delay
+is fixed, not random. Its default remains 0. Use it when the application requires
+spaced keyboard events. The existing action timeout still applies. After an
+interrupted typing action, inspect the field before adding more text.
+
+`browser_fill` is unchanged. No automatic mouse-path simulation, user-agent
+spoofing, or new navigator/WebGL override is installed.
 
 ## Browser Actions And Login
 
@@ -177,6 +259,10 @@ Use short bounded waits that leave the browser usable. Explicit navigation may
 recreate a closed page. Treat HTTP 401/403 and Cloudflare challenges as access
 denial: report the blocker rather than automatically navigating, recapturing
 login, restarting, or changing browser settings to bypass it.
+Navigation reports denial before checking saved-account evidence or an optional
+readiness selector. Recognized challenge pages can be reported even with HTTP
+200. An ordinary page that mentions Cloudflare is not sufficient challenge
+evidence. These reports do not add a new workflow-switch or tool-use gate.
 
 Record intent before sending, publishing, purchasing, or starting generation.
 After an interruption, mark the outcome unknown and inspect the original page

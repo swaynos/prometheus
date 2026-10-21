@@ -1,16 +1,20 @@
 # Browser Operations, Recovery, And Migration
 
 Prometheus owns the managed Playwright browser integration. The five runtime
-files retain the behavior imported from `cuddly-winner`, with the namespace
-changed to `prometheus`. Browser work remains separate from goal execution.
+files started from `cuddly-winner`, with the namespace changed to `prometheus`.
+Prometheus now adds optional context settings, input timing, readiness controls,
+and runtime metadata. Browser work remains separate from goal execution.
 
 ## Source And Scope
 
-The imported runtime matches the browser files at source commit
+The original imported runtime matched the browser files at source commit
 `ccdf463463146c1fe1d2905ed08a83dbe0369de5` in `cuddly-winner`. The source checkout
 was at `0b3e67f` when that match was verified. Ten imported browser test files
 provide behavior regression coverage. `scripts/import-browser.mjs` is a one-time
 bootstrap tool. It refuses to overwrite files and is not an update mechanism.
+The current runtime includes local extensions. Do not describe it as an exact
+namespace-only copy. Wrapper equality also does not establish dependency or
+browser-version equality.
 
 The installer targets OpenCode V2 `mcp.servers`, ordered permission rules, and
 JSON/JSONC configuration. It does not migrate OpenCode V1 configuration. It does
@@ -106,6 +110,28 @@ directory. Missing or changed dependency manifests block a no-op installation.
 Inspect and remove/reinstall the owned profile to repair that dependency tree.
 The `configured` status alone does not prove dependency or browser readiness.
 
+### Runtime Settings And Validation Context
+
+Existing three-key browser settings remain valid. Optional `launchOptions` and
+`contextOptions` are documented in [the browser reference](RESOURCE-SELECTION.md).
+Settings files are preserved by installation; an update does not select new
+display values, change modes, refresh authentication, or pin a different browser.
+
+Before and after a validation task, capture `browser_status`. Record its
+Playwright version, Node version, platform, architecture, configured distribution,
+explicit launch options, context options, and running browser version. This is
+diagnostic context, not a new startup gate or a universal access qualification.
+The reported launch options do not enumerate every internal Playwright argument.
+
+The optional navigation readiness selector and fixed typing delay do not add
+random behavior or automatic retries. Denial classification precedes saved-login
+verification, so a challenge is not treated as proof that credentials must be
+captured again. The existing browser modes and workflow-selection rules remain.
+
+Do not update an active installation by copying runtime files manually. Stop the
+affected work, run the installer with a truthful `--quiescent` assertion, and
+restart OpenCode. A repository change is not a loaded MCP service change.
+
 ## Rollback, Removal, And Interruptions
 
 Stop affected work before either operation:
@@ -151,6 +177,11 @@ npm run test:controller
 npm run test:controller:native
 ```
 
+To include installed Chrome in the browser-channel checks and the isolated
+installed-runtime test, run `PROMETHEUS_TEST_BROWSER_CHANNEL=chrome npm test`.
+The default suite still tests the bundled shell and full Chromium. These tests
+use local fixtures, not accounts or challenged public sites.
+
 The profile tests cover cutover, configuration preservation, state copies,
 updates, rollback, removal, injected failures, interrupted-process recovery, and
 unsafe paths. Their installed-runtime test uses actual isolated npm dependencies,
@@ -161,7 +192,7 @@ Linux-only virtual-display tests require Xvfb. On other hosts they remain explic
 skips; macOS results do not establish successful Linux display execution. Live
 account login and site-specific access remain separate human-authorized checks.
 
-### 2026-10-20 Qualification
+### 2026-10-20 Import Qualification (Historical)
 
 On macOS with Node 24.15.0:
 
@@ -176,3 +207,37 @@ also passed a namespace-normalized comparison with the source checkout. The
 installed smoke test used synthetic account state and verified attachment and
 download bytes. This qualification did not modify the active global profile or
 restart its services. Live-account and Linux display qualification remain open.
+
+### 2026-10-20 Runtime Settings Qualification
+
+The runtime interface is now version 1.1.0. On macOS ARM64 with Node 24.15.0,
+Playwright 1.63.0, and installed Chrome 156.0.8078.47:
+
+| Check | Passed | Failed | Skipped |
+| --- | --- | --- | --- |
+| `PROMETHEUS_TEST_BROWSER_CHANNEL=chrome npm test` | 79 | 0 | 3 Linux/Xvfb cases |
+| `npm run test:controller` | 109 | 0 | 0 |
+| `npm run test:controller:native` | 0 | 13 | 0 |
+
+The native controller checks failed because their isolated OpenCode service
+reported 2.1.1 while the controller requires 2.0.29. No controller compatibility
+guard or installed OpenCode version was changed. These failures do not establish
+a browser runtime failure or a successful native qualification.
+
+The browser checks cover configured launch/context settings, fixed keyboard-event
+delay, explicit readiness signals, HTTP 200 challenge reporting, and denial
+precedence over saved-account verification. The installed-runtime test performs
+real isolated dependency installation and verified transfers with synthetic state.
+The display check observed the configured geometry, pixel density, language,
+timezone, color scheme, and motion preference in installed headless Chrome.
+
+The first focused run hit macOS's socket-path limit in the longer test temporary
+directory. It passed with the normal macOS temporary path. The first full run
+also caught a test attempting arbitrary evaluation after saved-state hydration;
+the test now measures geometry before loading private state. The production
+evaluation restriction remains unchanged.
+
+This update did not change package versions, the active global browser settings,
+saved accounts, workflow rules, or active services. The active installation still
+requires a quiescent installer update and an OpenCode restart. No denied public
+site was retried, and no Cloudflare access fix is claimed.

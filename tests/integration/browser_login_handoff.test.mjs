@@ -24,6 +24,7 @@ test("detached login survives commands and saves only on explicit user completio
       import { serveLogin } from ${JSON.stringify(new URL("../../scripts/opencode-browser-login.mjs", import.meta.url).href)};
       process.once('message', async opts => {
         await serveLogin(opts, { chromium: { launchPersistentContext: async (profile, options) => {
+          await import('node:fs/promises').then(fs => fs.writeFile(${JSON.stringify(path.join(dir, "launch-options.json"))}, JSON.stringify(options)));
           const context = await chromium.launchPersistentContext(profile, {...options, headless: true});
           await context.route('https://**/*', route => route.fulfill({contentType: 'text/html', body:
             '<script>localStorage.setItem("session", "private-fixture"); document.cookie="sid=private-fixture; Secure";</script><p>No known account selector</p>'}));
@@ -34,6 +35,8 @@ test("detached login survives commands and saves only on explicit user completio
         }}});
       });
     `);
+    await writeFile(path.join(dir, "prometheus-browser.json"), JSON.stringify({ channel: "default",
+      contextOptions: { viewport: { width: 1440, height: 900 }, locale: "en-GB" } }));
     const opts = login.validateStartArgs({ "config-dir": dir, name: "site", url: "https://site.example/", origin: ["https://site.example"] });
     await writeFile(starter, `
       import { fork } from 'node:child_process';
@@ -49,6 +52,10 @@ test("detached login survives commands and saves only on explicit user completio
     const start = async () => JSON.parse((await run(process.execPath, [starter])).stdout);
     const started = await start(); // The launcher has exited, not merely returned.
     assert.equal(started.status, "awaiting-user");
+    const launchOptions = JSON.parse(await readFile(path.join(dir, "launch-options.json"), "utf8"));
+    assert.equal(launchOptions.headless, false, "the human login remains headed");
+    assert.deepEqual(launchOptions.viewport, { width: 1440, height: 900 });
+    assert.equal(launchOptions.locale, "en-GB");
     assert.equal(statMetadata(dir, "site"), null, "visible UI and cookies never trigger automatic capture");
     assert.equal((await cli("pending")).status, "awaiting-user");
     assert.equal(statMetadata(dir, "site"), null);

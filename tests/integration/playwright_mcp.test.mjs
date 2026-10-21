@@ -15,9 +15,21 @@ const server = path.join(repo, "scripts", "opencode-playwright-mcp.mjs");
 
 function fixtureServer() {
   const httpServer = http.createServer((req, res) => {
-    if (req.url === "/challenge") {
-      res.writeHead(403, { "content-type": "text/html" });
+    if (["/challenge", "/challenge-ok"].includes(req.url)) {
+      res.writeHead(req.url === "/challenge" ? 403 : 200, { "content-type": "text/html" });
       res.end("<!doctype html><title>Just a moment...</title><h1>Checking your browser before accessing example.com</h1>");
+      return;
+    }
+    if (req.url === "/cloudflare-docs") {
+      res.setHeader("content-type", "text/html");
+      res.end("<!doctype html><title>Cloudflare documentation</title><h1>How to handle a Cloudflare challenge</h1>");
+      return;
+    }
+    if (req.url === "/delayed-ready") {
+      res.setHeader("content-type", "text/html");
+      res.end(`<!doctype html><title>Readiness fixture</title><script>
+        setTimeout(() => { const button = document.createElement('button'); button.id = 'ready'; button.textContent = 'Ready'; document.body.append(button); }, 150);
+      </script><body><p>Loading application</p></body>`);
       return;
     }
     if (req.url === "/denied") {
@@ -76,7 +88,7 @@ async function stateConfig(base, selector) {
 
 // Minimal JSON-RPC-over-stdio client for the spawned server.
 function client(env = {}) {
-  const child = spawn("node", [server], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, ...env } });
+  const child = spawn("node", [server], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, PROMETHEUS_CONFIG_DIR: "", ...env } });
   const pending = new Map();
   let nextId = 1;
   createInterface({ input: child.stdout }).on("line", (line) => {
@@ -113,7 +125,9 @@ function client(env = {}) {
   return { child, rpc, call, textOf, close: () => child.stdin.end() };
 }
 
-for (const channel of ["default", "chromium"]) {
+const channels = [...new Set(["default", "chromium", process.env.PROMETHEUS_TEST_BROWSER_CHANNEL].filter(Boolean))];
+
+for (const channel of channels) {
   test(`managed ${channel} browser reports its applied launch options`, async () => {
     const { httpServer, base } = await fixtureServer();
     const c = client({ PROMETHEUS_BROWSER_CHANNEL: channel, PROMETHEUS_CONFIG_DIR: "" });
@@ -122,8 +136,13 @@ for (const channel of ["default", "chromium"]) {
       assert.equal(result.isError, undefined);
       const evidence = JSON.parse(c.textOf(await c.call("browser_status")));
       assert.equal(evidence.mode, "headless");
-      assert.deepEqual(evidence.launchOptions, { headless: true, ...(channel === "chromium" ? { channel } : {}) });
+      assert.deepEqual(evidence.launchOptions, { headless: true, ...(channel === "default" ? {} : { channel }) });
       assert.ok(evidence.browserVersion);
+      assert.match(evidence.playwrightVersion, /^\d+\.\d+\.\d+/);
+      assert.equal(evidence.platform, process.platform);
+      assert.equal(evidence.architecture, process.arch);
+      assert.equal(evidence.configuredDistribution, channel === "default" ? "chromium-headless-shell" : channel === "chrome" ? "installed-chrome" : "chromium");
+      assert.deepEqual(evidence.contextOptions, { viewport: { width: 1280, height: 1024 } });
     } finally { await c.call("browser_close"); c.close(); await new Promise((resolve) => httpServer.close(resolve)); }
   });
 }
@@ -332,3 +351,112 @@ test("user-confirmed capture loads for inspection without claiming task-browser 
     await c.call("browser_close", {});
   } finally { c.close(); httpServer.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+test("configured context options reach the page and metadata does not start a browser", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const root = await mkdtemp(path.join(os.tmpdir(), "prometheus-context-"));
+  const contextOptions = { viewport: { width: 1440, height: 900 }, screen: { width: 1440, height: 1000 },
+    deviceScaleFactor: 2, locale: "en-GB", timezoneId: "Europe/London", colorScheme: "dark", reducedMotion: "reduce" };
+  await writeFile(path.join(root, "prometheus-browser.json"), JSON.stringify({ channel: process.env.PROMETHEUS_TEST_BROWSER_CHANNEL || "default", automationCompatibility: true, contextOptions, launchOptions: { slowMo: 0 } }));
+  const c = client({ PROMETHEUS_CONFIG_DIR: root });
+  try {
+    const before = JSON.parse(c.textOf(await c.call("browser_status")));
+    assert.equal(before.contextOpen, false);
+    assert.equal(before.browserVersion, null);
+    assert.deepEqual(before.contextOptions, contextOptions);
+    assert.equal(before.launchOptions.slowMo, 0);
+    await c.call("browser_navigate", { url: base });
+    const observed = JSON.parse(c.textOf(await c.call("browser_evaluate", { expression: `JSON.stringify({width: innerWidth, height: innerHeight,
+      scale: devicePixelRatio, screenHeight: screen.height, language: navigator.language,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      dark: matchMedia('(prefers-color-scheme: dark)').matches, reduce: matchMedia('(prefers-reduced-motion: reduce)').matches})` })));
+    assert.deepEqual(observed, { width: 1440, height: 900, scale: 2, screenHeight: 1000, language: "en-GB", timezone: "Europe/London", dark: true, reduce: true });
+  } finally { await c.call("browser_close"); c.close(); httpServer.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("navigation waits for an explicit application signal and preserves the page on timeout", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const c = client();
+  try {
+    const ready = await c.call("browser_navigate", { url: `${base}/delayed-ready`, wait_until: "domcontentloaded", ready_selector: "#ready", timeout: 2 });
+    assert.equal(ready.isError, undefined, c.textOf(ready));
+    assert.equal(c.textOf(await c.call("browser_count", { selector: "#ready" })), "1");
+    const timedOut = await c.call("browser_navigate", { url: base, ready_selector: "#missing", timeout: 0.1 });
+    assert.equal(timedOut.isError, true);
+    assert.match(c.textOf(timedOut), /navigation readiness wait expired.*page remains open/);
+    assert.match(c.textOf(await c.call("browser_snapshot")), /Fixture Home/);
+    for (const options of [{ wait_until: "bad" }, { wait_until: null }, { ready_selector: "" }, { timeout: -1 }]) {
+      assert.equal((await c.call("browser_navigate", { url: base, ...options })).isError, true);
+    }
+  } finally { await c.call("browser_close"); c.close(); httpServer.close(); }
+});
+
+test("fixed typing delay spaces keyboard events without changing fill or default typing", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const c = client();
+  try {
+    await c.call("browser_navigate", { url: base });
+    await c.call("browser_fill", { selector: "#name", value: "A" });
+    await c.call("browser_evaluate", { expression: "window.keyTimes = []; document.querySelector('#name').addEventListener('keydown', () => keyTimes.push(performance.now()));" });
+    const typed = await c.call("browser_type", { selector: "#name", text: "bc", delay_ms: 40 });
+    assert.equal(typed.isError, undefined, c.textOf(typed));
+    const evidence = JSON.parse(c.textOf(await c.call("browser_evaluate", { expression: "JSON.stringify({value: document.querySelector('#name').value, times: keyTimes})" })));
+    assert.equal(evidence.value, "Abc");
+    assert.equal(evidence.times.length, 2);
+    assert.ok(evidence.times[1] - evidence.times[0] >= 20, "keyboard events are spaced, not instant");
+    assert.equal((await c.call("browser_type", { selector: "#name", text: "d" })).isError, undefined);
+    for (const delay_ms of [-1, 1001, "100", null]) {
+      assert.equal((await c.call("browser_type", { selector: "#name", text: "not typed", delay_ms })).isError, true);
+    }
+    assert.equal(c.textOf(await c.call("browser_evaluate", { expression: "document.querySelector('#name').value" })), "Abcd");
+  } finally { await c.call("browser_close"); c.close(); httpServer.close(); }
+});
+
+test("HTTP 200 challenges are classified without matching ordinary documentation", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const c = client();
+  try {
+    const challenged = c.textOf(await c.call("browser_navigate", { url: `${base}/challenge-ok`, ready_selector: "#never", timeout: 1 }));
+    assert.match(challenged, /status 200, Cloudflare challenge detected/);
+    assert.doesNotMatch(challenged, /readiness wait expired/);
+    const normal = c.textOf(await c.call("browser_navigate", { url: `${base}/cloudflare-docs` }));
+    assert.match(normal, /status 200/);
+    assert.doesNotMatch(normal, /challenge detected|access denied/);
+  } finally { await c.call("browser_close"); c.close(); httpServer.close(); }
+});
+
+test("denial is reported before saved-account verification or readiness waiting", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const root = await stateConfig(base, "#missing-account-menu");
+  const c = client({ PROMETHEUS_CONFIG_DIR: root });
+  try {
+    const denied = await c.call("browser_navigate", { url: `${base}/denied`, ready_selector: "#never", timeout: 1 });
+    assert.equal(denied.isError, undefined, c.textOf(denied));
+    assert.match(c.textOf(denied), /status 403, access denied/);
+    assert.doesNotMatch(c.textOf(denied), /new login|readiness wait expired/);
+    const status = JSON.parse(c.textOf(await c.call("browser_status")));
+    assert.equal(status.hydratedAuthentication, false);
+  } finally { await c.call("browser_close"); c.close(); httpServer.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Playwright MCP server runs with external Chrome and CDP attachment", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const c = client({ PROMETHEUS_BROWSER_EXECUTION_MODE: "external-cdp" });
+  try {
+    const res = await c.call("browser_navigate", { url: `${base}/` });
+    assert.equal(res.isError, undefined, c.textOf(res));
+    assert.match(c.textOf(res), /status 200/);
+
+    const snap = c.textOf(await c.call("browser_snapshot"));
+    assert.match(snap, /Fixture Home/);
+
+    const status = JSON.parse(c.textOf(await c.call("browser_status")));
+    assert.equal(status.configuredDistribution, "external-chrome-cdp");
+    assert.equal(status.mode, "external-cdp");
+  } finally {
+    await c.call("browser_close");
+    c.close();
+    httpServer.close();
+  }
+});
+
