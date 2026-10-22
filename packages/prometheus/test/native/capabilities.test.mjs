@@ -6,6 +6,7 @@ import os from 'node:os';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { requireOpenCodeVersion } from '../../src/compatibility.mjs';
 
 const exec = promisify(execFile);
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -93,7 +94,7 @@ export default { id:'prometheus-probe', async setup(ctx) {
     assert.fail(`The native probe did not load.\n${output}\n${JSON.stringify(diagnostic)}\n${JSON.stringify(configDiagnostic)}`);
   }
   const result = JSON.parse(fs.readFileSync(proof, 'utf8'));
-  assert.match(result.version, /^2\./);
+  requireOpenCodeVersion(result.version);
   assert.match(result.parent, /^ses_/);
   assert.match(result.child, /^ses_/);
   assert.equal(result.parentID, result.parent);

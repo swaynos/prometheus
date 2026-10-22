@@ -7,10 +7,27 @@ It supplies conversation-derived goals, persistent repair, and independent accep
 
 This package is experimental.
 Deterministic tests and scripted native tests establish mechanics.
-Real-model qualification remains necessary.
+Real-model verification remains necessary.
 
-The native contract targets OpenCode 2.0.29.
-The package rejects other service versions until their native contract passes qualification.
+## Compatibility
+
+`prometheus.openCodeReleaseLine` in [package.json](package.json) defines the accepted OpenCode major.minor release line.
+The plugin, scenario driver, and campaign meter use this one policy.
+They accept stable patch releases in that line only.
+They reject other lines, prereleases, build suffixes, and malformed versions.
+
+From the package directory, inspect the policy without starting a service:
+
+```sh
+node --input-type=module -e 'import { OPENCODE_VERSION_LABEL } from "./src/compatibility.mjs"; console.log(OPENCODE_VERSION_LABEL)'
+```
+
+Acceptance is a compatibility policy, not proof that every patch release passed verification.
+The exact `@opencode/plugin` and `@opencode/client` dependency pins identify the installed libraries.
+They do not define the accepted service range.
+Change the policy and dependency pins together when adopting another release line.
+Repeat native verification and retain the exact tested environment before making a support claim.
+
 The managed process boundary currently supports macOS `sandbox-exec`.
 Other platforms reject process execution before launch.
 
@@ -35,7 +52,10 @@ npm pack ./packages/prometheus --pack-destination /absolute/path/to/package-outp
 Extract the archive into a separate installation directory.
 The archive contains a `package/` directory.
 Use that directory in the configuration below.
-Node-based operator and qualification tools also need the package dependencies there.
+Node-based operator and scenario tools also need the package dependencies there.
+Copy `packages/prometheus/package-lock.json` from the same checkout into the
+extracted `package/` directory, then run `npm ci --prefix /absolute/path/to/package`.
+The npm archive does not include the lockfile.
 
 Add the package directory to the V2 `plugins` configuration.
 Preserve unrelated configuration.
@@ -122,12 +142,12 @@ Write experiments use an owned directory rather than the product directory.
 - Invoke `/browser` in a separate native conversation. Enrolled sessions do not receive browser tools.
 - No real-model reliability claim accompanies this version.
 
-## Qualification tools
+## Scenario runner
 
 Read [the runner reference](qualification/README.md) for multi-step scenarios, independent checks, and paired native-Build runs.
 Approval binds the runtime, fixtures, and procedures. The campaign ledger shares one request allowance across both arms and all model work.
 Follow-up attempts can carry prior consumption instead of resetting it.
 The tools require a user-selected model and allowance before paid execution.
-Campaign completion does not establish full-release qualification.
+Campaign completion does not establish release readiness.
 
 Writing follows ASD-STE100 sentence conventions. Full dictionary conformity is not verified.

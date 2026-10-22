@@ -5,7 +5,7 @@ Date: 2026-10-16.
 Target: OpenCode V2.
 
 This document defines the required product. It does not claim that the product already provides these capabilities.
-The user authorized publication of this specification. That request does not authorize implementation or paid qualification.
+The user authorized publication of this specification. That request does not authorize implementation or paid verification runs.
 
 ## 1. Purpose
 
@@ -685,14 +685,14 @@ A status request must not resume work.
 - Unknown effects remain visible.
 - Recovery does not silently replay uncertain actions.
 
-## S10. Implementation and qualification
+## S10. Scenarios and verification
 
 ### S10.1 Evidence discipline
 
 Distinguish these claims:
 
 1. Mechanics verified through deterministic tests.
-2. Behavior qualified through real-model runs.
+2. Behavior verified through real-model runs.
 3. Live outcome verified through external evidence.
 
 Do not substitute one claim for another.
@@ -700,8 +700,8 @@ Record human intervention and manual repair.
 A rescued run does not establish unattended completion.
 
 Use historical Cuddly Winner results as supplied evidence, not a root-cause diagnosis.
-The recorded five-case qualification passed one case.
-Four cases remained unqualified after the shared 150-turn allowance.
+The recorded five-scenario test run passed one scenario.
+Four scenarios remained unverified after the shared 150-turn allowance.
 Do not assume that stronger prompts or additional state files resolve that result.
 
 ### S10.2 Dependency order
@@ -713,7 +713,7 @@ Do not assume that stronger prompts or additional state files resolve that resul
 | C | Investigation and decision workflow. | Spikes, grilling, correction records, and intent-preserving mode changes. |
 | D | Complete goal behavior. | Validator-only goals, subscopes, pivots, and natural-language execution. |
 | E | Recovery hardening. | Fault tests for ownership, cancellation, uncertain effects, and consumption. |
-| F | Installed qualification. | Declared scenarios, baseline comparisons, and retained evidence. |
+| F | Installed scenario verification. | Declared scenarios, baseline comparisons, and retained evidence. |
 
 Provide basic permissions, cancellation, and resource controls before paid experiments.
 Stage E hardens existing controls. It does not introduce them for the first time.
@@ -778,7 +778,7 @@ Measure accepted completion, false acceptance, consumption, elapsed time, and us
 Evaluate discovery quality separately when the task begins without a prepared specification.
 Do not infer general superiority from one successful example.
 
-Before paid qualification, obtain the model choice and aggregate allowance.
+Before paid verification runs, obtain the model choice and aggregate allowance.
 Declare required scenarios and release gates before the run.
 Preserve failed runs and their consumption.
 
@@ -788,12 +788,12 @@ Maintain:
 
 - A brief README and command reference.
 - This specification and implementation decisions.
-- A repeatable qualification procedure.
-- Qualification results and evidence references.
+- Required scenarios and a repeatable verification procedure.
+- Verification results and evidence references.
 
 Report the loaded runtime version.
 Installer success does not prove that an existing service loaded new code.
-Do not present proposed commands as installed features before qualification.
+Do not present proposed commands as installed features before verification.
 
 ## 3. First-release completion
 
@@ -837,7 +837,7 @@ Ask the user only when findings require a scope, authority, acceptance, or resou
 Retain four narrow improvements from the notebook consultation:
 
 1. Test the complete execution loop early.
-2. Compare qualification results against ordinary Build.
+2. Compare scenario results against ordinary Build.
 3. Bind acceptance to the validator version.
 4. Distinguish requested stopping from confirmed cessation.
 

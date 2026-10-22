@@ -56,6 +56,24 @@ test("selection is deterministic, strict, and excludes legacy unless requested",
   assert.equal(info.catalogSHA256, PROFILE_CATALOG_SHA256);
 });
 
+test("Linux Chrome presets retain upstream versions and permit repeatable display variation", () => {
+  const profiles = BROWSER_PROFILES.filter(p => p.id.startsWith("desktop-linux-chrome-"));
+  assert.equal(profiles.length, 3);
+  const upstreamVersion = /Chrome\/([\d.]+)/.exec(devices["Desktop Chrome"].userAgent)[1];
+  for (const profile of profiles) {
+    assert.equal(profile.browserVersion, upstreamVersion);
+    assert.equal(/Chrome\/([\d.]+)/.exec(profile.userAgent)[1], upstreamVersion);
+  }
+  const ids = new Set();
+  for (let i = 0; i < 30; i++) {
+    const selection = { seed: `linux-${i}`, os: "Linux", engine: "chromium", deviceClass: "desktop", legacy: false };
+    const config = validateBrowserConfig({ channel: "default", profile: selection });
+    assert.deepEqual(validateBrowserConfig({ channel: "default", profile: selection }), config);
+    ids.add(config.profile);
+  }
+  assert.ok(ids.size > 1, "selection must not force one Linux preset");
+});
+
 test("configuration resolves seeds and exposes non-secret reproducibility metadata", () => {
   const config = { channel: "default", profile: { seed: "campaign", engine: "chromium", os: "Android" } };
   const normalized = validateBrowserConfig(config);

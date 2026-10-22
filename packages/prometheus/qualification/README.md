@@ -1,7 +1,8 @@
-# Qualification Runner
+# Scenario runner
 
 This is an operator tool, not a Prometheus command or agent.
 It collects observations. It does not certify a complete release.
+The commands below retain the `qualification/` implementation path.
 
 ## Admission
 
@@ -20,7 +21,7 @@ node qualification/run.mjs --manifest /absolute/path/to/manifest.json
 
 The fingerprint binds the manifest bytes, runtime source, package metadata, fixtures, reference examples, and independent checks.
 A relevant change invalidates that fingerprint.
-After approval, execute against an existing authenticated OpenCode 2.0.29 service:
+After approval, execute against an existing authenticated service that satisfies the [package compatibility policy](../README.md#compatibility):
 
 ```sh
 node qualification/run.mjs --manifest /absolute/path/to/manifest.json --approval THE_FINGERPRINT --output /absolute/path/to/new-results
@@ -45,10 +46,10 @@ Moving a manifest requires correcting or preserving those paths.
 | `version` | `2`. The original single-prompt shape also remains supported. |
 | `model` | Explicit `providerID`, `id`, and optional `variant`. No credentials or provider settings. |
 | `maxRequests` | One total allowance across all cases, arms, children, auxiliary requests, retries, and uncertain reservations. |
-| `timeoutMs` | Aggregate active qualification duration. All case setup, checks, interaction waits, and model work consume it. |
+| `timeoutMs` | Aggregate active verification duration. All case setup, checks, interaction waits, and model work consume it. |
 | `maxUSD` | Optional observed-cost estimate limit. It is not a billing guarantee. |
 | `evidenceClass` | `real-model`, or `scripted-native` for a declared scripted provider. The field records the declared evidence source. |
-| `previousCampaign` | Optional prior output directory. A reviewed follow-up carries its consumed requests, observed cost, and active qualification duration. Totals do not reset. |
+| `previousCampaign` | Optional prior output directory. A reviewed follow-up carries its consumed requests, observed cost, and active verification duration. Totals do not reset. |
 | `cases` | Ordered, named scenarios. |
 
 Each case has:
@@ -91,7 +92,7 @@ Targets must exist. Each step records intent, outcome, and timestamps.
 | `permission` | Match the exact `action` and ordered `resources`. Reply `decision: once` or `reject`. Never save a blanket approval. |
 | `answer` | Match one exact native form `title`; supply its declared `answer` map. An ambiguous match is an error. |
 | `human` | Await a declared native `request`: `form` or `permission`. Supply operator-only `instructions`. Permissions need the expected `action`; exact `resources` and a form `title` are optional selectors. The runner never answers for the user. |
-| `mutate` | Apply a controlled fault to an owned relative `path`, with `content` and `reason`. It cannot alter qualification controls. |
+| `mutate` | Apply a controlled fault to an owned relative `path`, with `content` and `reason`. It cannot alter verification controls. |
 
 `participation` is `stimulus`, `decision`, or `rescue`.
 Form, permission, and declared human replies default to `decision`. Other steps default to `stimulus`.
@@ -99,7 +100,7 @@ Unexpected native user messages or replies, operator grants, and declared rescue
 Do not classify implementation help as a preference decision merely to change the result.
 Unknown step fields fail admission instead of being silently ignored.
 For a human step, wait for the runner's notice, open the identified native session, and answer there.
-Use only one-time permission decisions. Persistent grants are interventions, not clean qualification.
+Use only one-time permission decisions. Persistent grants count as interventions in the recorded result.
 The instructions go to the participant, not the model. This avoids prescribing a model's question wording.
 An unanticipated or ambiguous interaction is unresolved evidence. The runner does not guess a reply.
 Native auditing cannot identify every off-channel file edit. The operator must declare manual repair and other interventions.
@@ -161,7 +162,7 @@ Run controlled faults separately from performance comparisons.
 Scripted providers never establish a real-model comparison, even when the paired harness checks pass.
 
 Both arms use bounded local file, search, question, and shell tools.
-The qualification meter blocks external tools, arbitrary delegation, and unrestricted Code Mode in these owned fixtures.
+The campaign meter blocks external tools, arbitrary delegation, and unrestricted Code Mode in these owned fixtures.
 Native Build keeps its ordinary agent loop. It receives no Prometheus continuation or evaluator feedback.
 Its native shells receive the same declared macOS filesystem boundary and stripped environment.
 This is not a comparison against unrestricted machine-wide Build authority.
@@ -170,7 +171,7 @@ The ledger reserves HTTP and WebSocket work before dispatch.
 Fallbacks and uncertain requests can conservatively consume multiple reservations.
 Fixed native titles prevent an ambient auxiliary-model choice in either arm.
 No worker or evaluator can select a different model or enlarge the allowance silently.
-Dispatch also checks the qualification owner's process identity, not only whether its PID exists.
+Dispatch also checks the campaign owner's process identity, not only whether its PID exists.
 
 ## Failure, inspection, and follow-up
 
@@ -190,7 +191,7 @@ Inspection reads the saved report. It does not establish current remote activity
 Existing output cannot be overwritten or automatically resumed.
 For a repaired candidate, prepare a new manifest with `previousCampaign` and the same approved aggregate totals, or explicitly approved new totals.
 That manifest binds the prior report and carries its consumption into a fresh attempt directory.
-Offline development time between attempts does not consume active qualification duration.
+Offline development time between attempts does not consume active verification duration.
 Unconfirmed prior activity or unknown effects block this follow-up path. Reconcile them before further authorization; do not edit SQLite records to manufacture clearance.
 Keep the previous report unchanged. A successful follow-up does not erase a failure or rescue.
 

@@ -122,7 +122,7 @@ explicit options, not the full list of Playwright's internal Chromium arguments.
 
 For an existing `cuddly-winner-browser` registration, add `--migrate`. See the
 [operations and recovery guide](BROWSER-OPERATIONS.md) in the source checkout for
-cutover, update, rollback, and qualification procedures. Installation launches a
+cutover, update, rollback, and verification procedures. Installation launches a
 blank task browser to check readiness. It never opens a login window or loads
 saved authentication during that check.
 
@@ -204,9 +204,12 @@ proves authentication. A challenge or access denial does not justify new login.
 
 ### CDP login handoff
 
-When shared settings explicitly select `executionMode: "external-cdp"` (or its
-`"cdp"` alias), the login helper uses the shared CDP connection path rather than
-Playwright's persistent-context launcher. Without an endpoint, it starts a
+The login helper uses CDP for ordinary `default`, `chromium`, and `chrome` login on macOS and Linux.
+This default applies when no enabled profile, context options, launch options, or virtual-display mode is selected.
+It does not change the selected channel or task-browser settings.
+Shared settings can also explicitly select `executionMode: "external-cdp"` or its `"cdp"` alias.
+The helper then uses the shared CDP path rather than Playwright's persistent-context launcher.
+Without an endpoint, it starts a
 dedicated Chrome process in headed mode with remote debugging bound to loopback.
 With `cdpOptions.endpoint`, it attaches to that browser's existing context; the
 operator must provide a headed, dedicated automation browser, not an everyday
@@ -220,7 +223,7 @@ CDP login does not select a random identity profile. Existing-context display
 settings are not recreated, and configured compatibility behavior remains shared
 with the CDP runtime. Attachment failures do not fall back to another launcher.
 
-This is an explicit workflow selection, not an automatic response to a challenge.
+Selection occurs before site access, not as an automatic response to a challenge.
 Do not switch workflows or retry an access denial to bypass it. CDP support does
 not guarantee that a site will permit login.
 

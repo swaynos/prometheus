@@ -1,52 +1,45 @@
-# Research browser profiles
+# Browser profiles
 
-`scripts/browser-profiles.mjs` exports 241 immutable presets:
+A profile is a set of browser emulation settings. It is not a verified hardware identity.
+Browser execution supports macOS and Linux, not Windows.
 
-| Source | Count | Status |
+## Available profiles
+
+`scripts/browser-profiles.mjs` supplies these read-only presets:
+
+| Source | Count | Type |
 | --- | ---: | --- |
-| Playwright 1.63.0 device registry | 207 | Upstream emulation presets, including landscape variants |
-| Windows/macOS/Linux desktop and HD/FHD/HiDPI displays | 30 | Explicitly synthetic emulation presets |
-| Original Chrome 124 identity experiments | 4 | Unverified legacy presets |
+| Playwright device registry | 207 | Device and desktop emulation |
+| Desktop OS and display variants | 30 | Synthetic emulation |
+| Chrome 124 identity presets | 4 | Unverified legacy settings |
 
-The upstream set includes Pixel, Galaxy, Fold/Flip cover displays, Android tablets,
-iPhone, iPad, legacy devices, and desktop Chromium, Edge, Firefox and WebKit presets.
-Landscape and cover-display entries are configurations, not additional physical devices.
-Windows host execution is not supported at this time; browser execution supports macOS and Linux.
+Landscape entries are settings for a device, not separate physical devices.
+The `legacy` label is a catalog classification, not a vendor support statement.
 
-## Inspect and select
-
-These commands are read-only and do not launch browsers:
+Inspect profiles without starting a browser:
 
 ```sh
-npm run browser:profiles -- list --engine chromium --os Android --legacy false
-npm run browser:profiles -- show pw-pixel-7
-npm run browser:profiles -- sample campaign-001 --engine chromium --device-class phone
+npm run browser:profiles -- list --engine chromium --os Linux --legacy false
+npm run browser:profiles -- show desktop-linux-chrome-fhd
+npm run browser:profiles -- sample campaign-001 --engine chromium --os Linux --device-class desktop
 ```
 
-Filter keys in the module API are `engine`, `os`, `deviceClass`, `orientation`, and
-`legacy`. CLI equivalents are `--engine`, `--os`, `--device-class`, `--orientation`,
-and `--legacy true|false`. Values are case-sensitive. Legacy classification is a
-curated compatibility label, **not** an authoritative vendor support lifecycle.
+Filters are `--engine`, `--os`, `--device-class`, `--orientation`, and `--legacy true|false`.
+Values are case-sensitive. Unknown IDs, invalid filters, and empty selections cause an error.
 
-`getBrowserProfile(id)` returns the exact immutable definition. Without an ID,
-it samples non-legacy presets; pass `{ seed, ...filters }` as its second argument
-for reproducibility. `listBrowserProfiles(filters)` lists definitions without sampling.
-`browserProfileInfo(id)` returns a detached copy including provenance, limitations,
-catalog version, and SHA-256. Unknown IDs, invalid filters, and empty selections fail.
+## Configure a profile
 
-## Configure managed sessions
-
-Set `profile` in `prometheus-browser.json`, alongside the existing `channel`:
+Set `profile` in `prometheus-browser.json`. Use an ID for an exact choice:
 
 ```json
 {
   "channel": "default",
-  "profile": "pw-pixel-7",
-  "contextOptions": { "locale": "en-GB", "timezoneId": "Europe/London" }
+  "profile": "desktop-linux-chrome-fhd"
 }
 ```
 
-Alternatively, use a deterministic selection in the settings file:
+Use a seed and filters to select from several profiles.
+A seed is text that makes the selection repeatable:
 
 ```json
 {
@@ -54,79 +47,88 @@ Alternatively, use a deterministic selection in the settings file:
   "profile": {
     "seed": "campaign-001",
     "engine": "chromium",
-    "os": "Android",
-    "orientation": "portrait",
+    "os": "Linux",
+    "deviceClass": "desktop",
     "legacy": false
   }
 }
 ```
 
-Without a settings file, `PROMETHEUS_BROWSER_PROFILE=pw-pixel-7` selects an ID.
-Settings-file precedence is unchanged. Seeded selectors normalize to an explicit ID.
-No profile is selected by default; existing browser behavior is unchanged.
+The same seed and catalog select the same ID. Another seed can select another ID.
+A catalog update can change the selection. Record the selected ID and catalog hash.
+Without a settings file, `PROMETHEUS_BROWSER_PROFILE` can select an ID.
+The settings file takes precedence over environment settings.
 
-Profiles apply UA, viewport/screen, pixel density, mobile mode, and touch settings
-as a unit. Conflicting `contextOptions` fail rather than silently changing the
-experiment. Locale, timezone, and media preferences can be set independently.
-Firefox and WebKit profiles require `channel: default` and their corresponding
-installed Playwright engines. Edge profiles select installed `msedge`. Missing
-engines/channels fail at launch; there is no fallback to a different browser.
-Install only the required engines using Playwright's normal installation workflow.
-Task and headed-login launches share engine selection. Existing virtual-display
-requirements still apply. Profiles are rejected with external CDP, because an
-already-running context cannot reliably accept the profile's creation settings.
+A profile sets the user agent, viewport, screen size, pixel density, mobile mode, and touch settings together.
+Conflicting `contextOptions` cause an error. You can set locale, timezone, and media preferences separately.
+The profile's browser version describes its source. It does not install or pin that browser release.
 
-## Reproducibility and evidence
+Firefox and WebKit profiles require `channel: "default"` and the corresponding installed Playwright engine.
+Edge profiles select installed `msedge`.
+A missing browser causes launch failure. The runtime does not select another browser automatically.
+For profiles, `automationCompatibility` is supported only with Chromium.
 
-`browserRuntimeInfo(config)` includes the resolved definition and catalog hash.
-`createTaskContext()` additionally returns `runtime` for profile-backed sessions,
-including the actual browser version. The MCP status reports this launch metadata
-once a session exists. Metadata before launch describes configuration, not observations.
+## Default login and explicit variation
 
-For approved test pages, `collectBrowserProfileEvidence(page)` collects UA,
-low-entropy client hints (if available), platform, display/touch values and optional
-WebGL1/WebGL2 renderer information. It does not read storage, cookies, credentials,
-or page content. Compare this evidence with server-observed HTTP headers; neither
-the profile nor a JavaScript observation alone proves network consistency.
+If `profile` is omitted, the runtime does not automatically select a preset from the full catalog.
+Managed task contexts can select a random legacy identity when no profile option or display override is set.
 
-Persist the resolved ID, catalog hash, actual runtime version, and observed evidence
-with each research run. Seeds are stable within a catalog, not across catalog updates.
-Unseeded sampling is for exploration, not reproducible experiments.
+Ordinary login uses CDP on macOS and Linux for `default`, `chromium`, and `chrome`.
+This applies when no enabled profile, context options, launch options, or virtual-display mode is selected.
+The channel stays unchanged. No preset or fixed browser version is added.
+The helper starts a headed browser with its native user agent unless an override is configured.
+See the [CDP login procedure](RESOURCE-SELECTION.md#cdp-login-handoff) for startup, attachment, and cleanup.
 
-## Identity limitations and legacy compatibility
+An explicit profile selects a managed context for emulation instead of default CDP login.
+Profiles cannot be combined with `external-cdp`. An existing context cannot reliably accept their creation-time settings.
+Task and login launches use the same profile engine selection. Virtual-display requirements still apply.
 
-**These are emulation presets, not captured complete browser fingerprints.** The UA
-does not install the browser release it names. Chromium is not Firefox or Safari;
-therefore profiles select real engine families rather than just changing their UA.
-WebKit emulation is not the shipping Safari browser or real iOS hardware.
+## Identity limits
 
-GPU, architecture, navigator platform, and client hints remain native or unavailable
-under `profile`. The catalog records unknown GPU/architecture/client-hint data as
-`null`; it does not manufacture observations. Native HTTP hints may differ from an
-emulated UA. Use actual devices/OS runtimes when complete identity fidelity matters.
+Under `profile`, GPU details, architecture, navigator platform, and client hints remain native or unavailable.
+Unknown catalog values are `null`. Native HTTP hints can differ from the profile's user agent.
+WebKit emulation is not the shipping Safari browser or physical iOS hardware.
+Use the actual device and operating system when full identity accuracy is required.
 
-The existing `identityProfile` option remains supported. Explicit new preset IDs
-use their emulation settings. `true`/`random` deliberately retain the original four
-legacy candidates; for reproducible broad selection use seeded `profile` instead.
-For original legacy IDs, `identityProfile` retains the earlier JavaScript-only
-platform/client-hint/WebGL overrides. These are **unverified experiments**, not
-coherent hardware identities: HTTP hints, worker APIs, actual capabilities, and
-rendered output are not guaranteed to match. `profile` and enabled `identityProfile`
-are mutually exclusive. `automationCompatibility` remains Chromium-only for profiles.
+`identityProfile` also accepts explicit profile IDs. `true` or `"random"` selects from the four legacy identity presets.
+Legacy identities add JavaScript-only platform, client-hint, and WebGL overrides.
+Those overrides do not guarantee matching network headers, worker APIs, hardware capabilities, or rendered output.
+Use seeded `profile` selection for repeatable emulation.
+Do not combine `profile` with an enabled `identityProfile`.
 
-## Sources and updates
+## Record evidence
 
-- [Pinned Playwright descriptors (Apache-2.0)](https://github.com/microsoft/playwright/blob/v1.63.0/packages/isomorphic/deviceDescriptorsSource.json)
-- [Playwright emulation behavior](https://playwright.dev/docs/emulation)
-- [Chrome User-Agent Client Hints](https://developer.chrome.com/docs/privacy-security/user-agent-client-hints)
-- [ANGLE backend/platform support](https://github.com/google/angle)
-- [WebGL renderer information and availability](https://developer.mozilla.org/en-US/docs/Web/API/WEBGL_debug_renderer_info)
+For each run, retain the selected ID, catalog hash, actual browser version, and observations.
+`browserRuntimeInfo(config)` reports the selected profile and catalog hash.
+For profile sessions, `createTaskContext()` also returns runtime metadata with the actual browser version.
+MCP status reports that metadata after launch. Before launch, metadata describes configuration only.
 
-Descriptors come from the exact pinned local Playwright dependency, with no runtime
-network fetch. The module refuses an unreviewed dependency version. When updating
-Playwright, review descriptor changes, update the version guard/source revision,
-bump the catalog version, and update count/hash expectations and fixtures. Synthetic
-desktop variants declare their derivation. Legacy GPU strings have no verified source;
-they are preserved for compatibility only. Do not add guessed GPU combinations as
-observed data. Any future captured hardware dataset needs explicit provenance,
-capture date/runtime, redistribution permission, and independent validation.
+On approved test pages, use `collectBrowserProfileEvidence(page)` to collect observations.
+It reads the user agent, available client hints, platform, display, touch, and WebGL renderer data.
+It does not read cookies, storage, credentials, or page content.
+Compare these observations with server-observed HTTP headers. JavaScript values alone do not prove network consistency.
+
+## Module API
+
+| Function | Result |
+| --- | --- |
+| `listBrowserProfiles(filters)` | Matching definitions without selection. |
+| `getBrowserProfile(id)` | One read-only definition. Without an ID, selects a non-legacy preset. |
+| `getBrowserProfile(undefined, { seed, ...filters })` | A repeatable selection within the catalog. |
+| `browserProfileInfo(id)` | A separate copy with source details, limits, catalog version, and hash. |
+
+API filter names are `engine`, `os`, `deviceClass`, `orientation`, and `legacy`.
+Unseeded selection is not repeatable.
+
+## Catalog maintenance
+
+Profiles use the pinned local Playwright descriptors. The runtime does not fetch them from the network.
+The module rejects an unreviewed Playwright version.
+When updating Playwright, review descriptor changes, update the guard and source revision, and increase the catalog version.
+Update count, hash, and test expectations together.
+
+Synthetic profiles must state how they were derived. Legacy GPU strings have no verified source.
+Do not label guessed hardware combinations as observations.
+A captured hardware dataset needs a source, capture date, runtime identity, redistribution permission, and independent validation.
+
+Sources: [pinned descriptors](https://github.com/microsoft/playwright/blob/v1.63.0/packages/isomorphic/deviceDescriptorsSource.json), licensed under Apache-2.0; [Playwright emulation](https://playwright.dev/docs/emulation).

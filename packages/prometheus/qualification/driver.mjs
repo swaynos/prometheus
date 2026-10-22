@@ -6,6 +6,7 @@ import { Store } from '../src/store.mjs';
 import { Runner } from '../src/sandbox.mjs';
 import { manifest as candidateManifest } from '../src/artifacts.mjs';
 import { atomic, canonical, hash, id, inside, localPath, privateDirectory, requireThat, errorText } from '../src/util.mjs';
+import { requireOpenCodeVersion } from '../src/compatibility.mjs';
 import { copyAsset, installRuntime, runtimeIdentity, verifyAdmission } from './manifest.mjs';
 import { compare, Ledger } from './ledger.mjs';
 import { preflight } from './preflight.mjs';
@@ -267,7 +268,7 @@ export async function runCampaign(admission, { client, output, signal, progress 
   requireThat(!fs.existsSync(output), 'Choose a new output directory. Existing campaigns cannot reset or replay.');
   requireThat(!inside(admission.runtimeRoot, output), 'Keep campaign output outside the installed package.');
   const service = await client.server.info({ signal: AbortSignal.timeout(15000) });
-  requireThat(service.version === '2.0.29', `Qualification supports OpenCode 2.0.29. The service reports ${service.version}.`);
+  requireOpenCodeVersion(service.version);
   signal?.throwIfAborted();
   privateDirectory(output);
   const installedRoot = installRuntime(admission, path.join(output, 'installation'));
