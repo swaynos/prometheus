@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,7 @@ test("ordinary Chromium login selects direct launch and CDP before site access",
     const selected = loginBrowserConfig({ channel, automationCompatibility: false });
     assert.deepEqual(selected, { channel, automationCompatibility: false, executionMode: "external-cdp" });
     assert.equal(selected.identityProfile, undefined);
+    assert.equal(selected.profile, undefined);
   }
   assert.equal(loginBrowserConfig({ channel: "chrome", executionMode: "cdp" }).executionMode, "external-cdp");
   for (const config of [
@@ -28,31 +30,62 @@ test("ordinary Chromium login selects direct launch and CDP before site access",
   ]) assert.notEqual(loginBrowserConfig(config).executionMode, "external-cdp", JSON.stringify(config));
 });
 
-test("default Chrome login uses the CDP handoff without changing task settings", async () => {
-  const configDir = await mkdtemp(path.join(os.tmpdir(), "login-cdp-default-"));
-  const browserConfig = { channel: "chrome", automationCompatibility: false };
-  let disconnected = 0, closed = 0;
-  const page = { goto: async () => {}, close: async () => { closed++; } };
-  const context = Object.assign(new EventEmitter(), { newPage: async () => page });
-  try {
-    await serveLogin({ configDir, name: "site", url: "https://site.example/", origins: ["https://site.example"], browser: browserConfig }, {
-      chromium: { launchPersistentContext: async () => assert.fail("must not launch through Playwright") },
-      launchExternalCdpContext: async (_engine, config, options) => {
-        assert.deepEqual(config, { ...browserConfig, executionMode: "external-cdp" });
-        assert.equal(options.headless, false);
-        return { context, browser: { close: async () => { disconnected++; } } };
-      },
-    });
-    assert.deepEqual(browserConfig, { channel: "chrome", automationCompatibility: false });
-    assert.equal(statMetadata(configDir, "site"), null);
-    assert.equal((await loginCommand(configDir, "site", "cancel")).status, "cancelled");
-    assert.equal(disconnected, 1);
-    assert.equal(closed, 1);
-  } finally {
-    await loginCommand(configDir, "site", "cancel").catch(() => {});
-    await rm(configDir, { recursive: true, force: true });
+test("macOS and Linux retain the same login selection rules", () => {
+  const configs = [
+    ...["default", "chromium", "chrome", "msedge"].map(channel => ({ channel, automationCompatibility: false })),
+    { channel: "default", identityProfile: false },
+    { channel: "default", profile: "desktop-linux-chrome-fhd" },
+    { channel: "default", profile: { seed: "login", os: "macOS", engine: "chromium", legacy: false } },
+    { channel: "default", identityProfile: "random" },
+    { channel: "default", contextOptions: { viewport: { width: 1440, height: 900 } } },
+    { channel: "default", launchOptions: { slowMo: 10 } },
+    { channel: "default", executionMode: "virtual-display" },
+    { channel: "chrome", executionMode: "cdp" },
+  ];
+  const expected = configs.map(config => loginBrowserConfig(config));
+  for (const platform of ["darwin", "linux"]) {
+    // Isolate the injected platform from this test process and Playwright imports.
+    const script = `
+      Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });
+      const { loginBrowserConfig } = await import(${JSON.stringify(new URL("../../scripts/opencode-browser-login.mjs", import.meta.url).href)});
+      console.log(JSON.stringify(${JSON.stringify(configs)}.map(config => loginBrowserConfig(config))));
+    `;
+    const actual = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 }));
+    assert.deepEqual(actual, expected, platform);
+    assert.deepEqual(actual[0], { channel: "default", automationCompatibility: false, executionMode: "external-cdp" });
+    assert.equal(actual[3].executionMode, undefined, "Edge retains its previous path");
+    assert.equal(actual[4].identityProfile, false, "explicit identity opt-out is retained");
+    assert.equal(actual[5].profile, "desktop-linux-chrome-fhd", "explicit presets are retained");
   }
 });
+
+for (const channel of ["default", "chromium", "chrome"]) {
+  test(`${channel} login uses the CDP handoff without changing task settings`, async () => {
+    const configDir = await mkdtemp(path.join(os.tmpdir(), "login-cdp-default-"));
+    const browserConfig = { channel, automationCompatibility: false };
+    let disconnected = 0, closed = 0;
+    const page = { goto: async () => {}, close: async () => { closed++; } };
+    const context = Object.assign(new EventEmitter(), { newPage: async () => page });
+    try {
+      await serveLogin({ configDir, name: "site", url: "https://site.example/", origins: ["https://site.example"], browser: browserConfig }, {
+        chromium: { launchPersistentContext: async () => assert.fail("must not launch through Playwright") },
+        launchExternalCdpContext: async (_engine, config, options) => {
+          assert.deepEqual(config, { ...browserConfig, executionMode: "external-cdp" });
+          assert.equal(options.headless, false);
+          return { context, browser: { close: async () => { disconnected++; } } };
+        },
+      });
+      assert.deepEqual(browserConfig, { channel, automationCompatibility: false });
+      assert.equal(statMetadata(configDir, "site"), null);
+      assert.equal((await loginCommand(configDir, "site", "cancel")).status, "cancelled");
+      assert.equal(disconnected, 1);
+      assert.equal(closed, 1);
+    } finally {
+      await loginCommand(configDir, "site", "cancel").catch(() => {});
+      await rm(configDir, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const action of ["complete", "cancel", "navigation-failure", "attachment-failure"]) {
   test(`CDP login ${action} preserves the attached context and existing tabs`, async () => {

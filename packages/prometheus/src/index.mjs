@@ -6,6 +6,7 @@ import { Controller, VERSION } from './controller.mjs';
 import { Native } from './native.mjs';
 import { Runner } from './sandbox.mjs';
 import { canonical, hash, id, requireThat, errorText } from './util.mjs';
+import { requireOpenCodeVersion } from './compatibility.mjs';
 import { controlSchema, limitsContract, withinLimits } from './contracts.mjs';
 import { originInstructions, ACTIONS } from './prompts.mjs';
 
@@ -13,7 +14,7 @@ const commandNames = ['spike', 'grill-me', 'goal'];
 const descriptions = { spike: 'Investigate technical unknowns.', 'grill-me': 'Resolve consequential user decisions.', goal: 'Infer the goal from this conversation. Prepare in Plan. Execute in Build.' };
 
 async function setup(ctx) {
-  requireThat(ctx.app.version === '2.0.29', `This build supports OpenCode 2.0.29. The current service reports ${ctx.app.version}.`);
+  requireOpenCodeVersion(ctx.app.version);
   if (ctx.options?.limits) limitsContract(ctx.options.limits);
   const root = canonical(ctx.location.directory);
   const stateBase = ctx.options?.stateDirectory ?? path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'), 'prometheus');

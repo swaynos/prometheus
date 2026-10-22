@@ -100,7 +100,7 @@ test("a headed browser launch failure removes its temporary profile", async () =
       ["start", "--config-dir", root, "--name", "A", "--url", "https://example.com/login", "--origin", "https://example.com"],
       { TMPDIR: tmp, PLAYWRIGHT_BROWSERS_PATH: path.join(root, "missing-browsers") },
     ),
-    (e) => e.code === 1 && /login window could not open|graphical session/.test(e.stderr),
+    (e) => e.code === 1 && /login window could not open|graphical session|login worker exited before opening a window/.test(e.stderr),
   );
   assert.deepEqual((await readdir(tmp)).filter((name) => name.startsWith("prometheus-login-")), []);
 }));

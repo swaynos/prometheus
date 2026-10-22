@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { copyAsset, installRuntime, loadManifest, tree, verifyAdmission } from '../qualification/manifest.mjs';
@@ -13,6 +14,9 @@ import { Store } from '../src/store.mjs';
 import { hash } from '../src/util.mjs';
 import { preflight } from '../qualification/preflight.mjs';
 import { Runner, sandboxAvailable } from '../src/sandbox.mjs';
+import { serviceVersion, unsupportedVersions } from './versions.mjs';
+import { OPENCODE_VERSION_LABEL } from '../src/compatibility.mjs';
+import meter from '../qualification/meter.mjs';
 
 const exec = promisify(execFile);
 const runtimeRoot = path.resolve(import.meta.dirname, '..');
@@ -36,7 +40,7 @@ async function setup(t, overrides = {}) {
 class ScriptedClient {
   constructor({ wrong = false, unexpected = false, failure = false } = {}) {
     this.wrong = wrong; this.unexpected = unexpected; this.failure = failure; this.sessions = new Map(); this.ledgers = new Set(); this.calls = [];
-    this.server = { info: async () => ({ version: '2.0.29' }) };
+    this.server = { info: async () => ({ version: serviceVersion }) };
     this.model = { list: async () => ({ data: [...this.sessions.values()].map(s => s.model) }) };
     this.session = {
       create: async input => {
@@ -101,6 +105,27 @@ class ScriptedClient {
 }
 const makeRunner = () => ({ run: async ({ cwd, argv }) => ({ code: fs.readFileSync(path.join(cwd, 'greeting.txt'), 'utf8') === 'hello' ? 0 : 1,
   interrupted: false, output: '', argv }) });
+
+test('unsupported service versions reject campaigns before output or sessions are created', async t => {
+  const f = await setup(t);
+  const client = new ScriptedClient();
+  t.after(() => client.close());
+  for (const version of unsupportedVersions) {
+    client.server.info = async () => ({ version });
+    await assert.rejects(runCampaign(f.admission, { client, output: f.output, makeRunner }),
+      error => error.message.includes(`supports stable OpenCode ${OPENCODE_VERSION_LABEL}`));
+    assert.equal(fs.existsSync(f.output), false);
+    assert.equal(client.sessions.size, 0);
+    assert.deepEqual(client.calls, []);
+  }
+});
+
+test('the qualification meter rejects unsupported versions before reading options or registering hooks', async () => {
+  for (const version of unsupportedVersions) {
+    await assert.rejects(meter.setup({ app: { version }, get options() { assert.fail('must reject before reading options'); } }),
+      error => error.message.includes(`supports stable OpenCode ${OPENCODE_VERSION_LABEL}`));
+  }
+});
 
 test('approval binds fixture bytes and independent check bytes', async t => {
   const f = await setup(t);
@@ -301,6 +326,12 @@ test('native shell boundaries quote the original program and remove inherited cr
   const f = await setup(t);
   const scratch = path.join(f.base, 'scratch'); fs.mkdirSync(scratch, { mode: 0o700 });
   const event = { cwd: f.fixture, shell: '/bin/zsh', command: "printf '%s' \"a'b\" > quoted.txt", env: { OPENAI_API_KEY: 'not-a-real-key' } };
+  if (!sandboxAvailable()) {
+    const original = structuredClone(event);
+    assert.throws(() => nativeShellBoundary(event, { root: f.fixture, scratch, protectedPaths: [f.base] }), /require macOS sandbox-exec/);
+    assert.deepEqual(event, original, 'An unavailable boundary must reject before changing the invocation.');
+    return;
+  }
   nativeShellBoundary(event, { root: f.fixture, scratch, protectedPaths: [f.base] });
   assert.match(event.command, /env -i/);
   assert.match(event.command, /sandbox-exec/);
@@ -400,6 +431,10 @@ test('each execution loads a fresh bound runtime rather than cached checkout mod
   assert.notEqual(report.installedRuntime.directory, runtimeRoot);
   assert.equal(fs.readFileSync(path.join(report.installedRuntime.directory, 'index.mjs'), 'utf8'), fs.readFileSync(path.join(runtimeRoot, 'index.mjs'), 'utf8'));
   assert.equal(fs.lstatSync(path.join(report.installedRuntime.directory, 'src/controller.mjs')).isSymbolicLink(), false);
+  const policy = await import(pathToFileURL(path.join(report.installedRuntime.directory, 'src/compatibility.mjs')));
+  assert.equal(policy.OPENCODE_VERSION_LABEL, OPENCODE_VERSION_LABEL);
+  assert.doesNotThrow(() => policy.requireOpenCodeVersion(serviceVersion));
+  assert.throws(() => policy.requireOpenCodeVersion(unsupportedVersions[0]));
 });
 
 test('approval rejects changed runtime bytes without modifying the source checkout', async t => {

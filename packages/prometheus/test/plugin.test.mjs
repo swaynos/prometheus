@@ -5,8 +5,10 @@ import path from 'node:path';
 import plugin from '../src/index.mjs';
 import { fixture } from './helpers.mjs';
 import { goal } from './helpers.mjs';
+import { serviceVersion, unsupportedVersions } from './versions.mjs';
+import { OPENCODE_VERSION_LABEL } from '../src/compatibility.mjs';
 
-async function host(t, { collisions = [] } = {}) {
+async function host(t, { collisions = [], version = serviceVersion } = {}) {
   const f = await fixture(t, { agent: 'plan' });
   const hooks = new Map();
   const commands = [];
@@ -15,7 +17,7 @@ async function host(t, { collisions = [] } = {}) {
   const registration = { dispose: async () => {} };
   const register = domain => async (name, callback) => { hooks.set(`${domain}.${name}`, callback); return registration; };
   const ctx = {
-    app: { version: '2.0.29' }, location: { directory: f.root }, options: { stateDirectory: path.join(f.base, 'plugin-state'), limits: { maxRequests: 100 } },
+    app: { version }, location: { directory: f.root }, options: { stateDirectory: path.join(f.base, 'plugin-state'), limits: { maxRequests: 100 } },
     command: { list: async () => ({ data: collisions }), transform: async callback => { callback({ add: c => commands.push(c) }); return registration; } },
     session: {
       get: ({ sessionID }) => f.native.get(sessionID), context: ({ sessionID }) => f.native.context(sessionID),
@@ -33,6 +35,15 @@ async function host(t, { collisions = [] } = {}) {
   };
   return { ...f, ctx, hooks, commands, tools, prompts };
 }
+test('unsupported OpenCode versions fail before commands are registered', async t => {
+  for (const version of unsupportedVersions) {
+    const h = await host(t);
+    h.ctx.app.version = version;
+    await assert.rejects(plugin.setup(h.ctx), error => error.message.includes(`supports stable OpenCode ${OPENCODE_VERSION_LABEL}`));
+    assert.equal(h.commands.length, 0);
+    assert.equal(h.tools.length, 0);
+  }
+});
 test('bare goal preserves conversation-driven instructions and attachments', async t => {
   const h = await host(t);
   const cleanup = await plugin.setup(h.ctx);

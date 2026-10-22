@@ -1,11 +1,10 @@
 # Prometheus Reference and Implementation
 
-Status: Experimental implementation. First-release qualification is incomplete.
-Date: 2026-10-16.
+Status: Experimental implementation. First-release verification is incomplete.
 
 Read [SPEC.md](../SPEC.md) for the product agreement.
 Read the [package guide](../packages/prometheus/README.md) for installation and limits.
-Read [QUALIFICATION.md](QUALIFICATION.md) for verification procedures and evidence.
+Read [Verification](VERIFICATION.md) for test procedures and evidence rules.
 Read [RESOURCE-SELECTION.md](RESOURCE-SELECTION.md) for browser tool rules.
 
 Writing follows ASD-STE100 conventions. Full dictionary conformity is not verified.
@@ -17,7 +16,7 @@ Root browser dependencies and the installer stay separate.
 The root package manifest adds only controller test scripts.
 Installation does not add global configuration, start a shared service, or make git commits.
 The controller uses the GNU General Public License version 3.
-The package stays private during qualification.
+The package stays private until the release gates pass.
 
 ## 2. Goal Inference and Authority
 
@@ -231,39 +230,9 @@ The user runs browser actions in a separate native conversation outside Promethe
 The originating conversation records external evidence for the relevant candidate.
 Recording external acceptance evidence requires native user permission.
 
-## 9. Implementation Milestones
+## 9. Native Integration Findings
 
-| Milestone | Current Evidence | Remaining Gate |
-| --- | --- | --- |
-| M0: Baseline | Browser regression, runtime versions, package ownership, coverage map. | Repeat regressions after relevant changes. |
-| M1: Native contract | Packaged plugin loading, commands, native session APIs, restrictions, interruptions. | Requalify before supporting new OpenCode versions. |
-| M2: Minimum controller | SQLite transactions, ownership checks, resource reservations, permission denials, stop records. | Real-model operational qualification. |
-| M3: Complete loop | Native scripted failure, independent rejection, same-worker repair, fresh accepted evidence. | Real-model inference and repair behavior. |
-| M4: Spikes | Pending Plan experiments, authorized Build continuation, owned outputs, findings, limits. | Real-model investigation quality. |
-| M5: Decisions and goals | Decision provenance, Plan preparation, natural execution, pivots, limited goal contracts. | All declared conversational scenarios with real models. |
-| M6: Recovery | Fault injection, cancellation races, unknown effects, isolated service crash and restart. | Installed fault qualification under selected model. |
-| M7: Installed qualification | Archive loading, campaign installs, multi-step checkpoints, shared metering, paired arms, reports. | Paid qualification, plain-Build comparisons, live outcomes. |
-
-## 10. Subscope Coverage (S1–S10)
-
-Test paths are relative to `packages/prometheus/`.
-
-| Subscope | Implementation | Main Evidence |
-| --- | --- | --- |
-| S1: Native integration | Plugin commands, scoped hooks, native adapter. | `test/plugin.test.mjs`, `test/native/`. |
-| S2: Records and handoffs | Transactional store, separate records, specification identities, publication checks. | `test/store.test.mjs`, `test/controller.test.mjs`. |
-| S3: Spikes | One child per question, owned experiments, stop conditions, structured findings. | Controller tests, native `discovery`. |
-| S4: Questions | Prompt guidance, decision records, examples, validator proposals, readiness states. | Decision tests. Quality needs real models. |
-| S5: Specifications | Goal contracts, ordered work, preserved documents, explicit source identities. | Plan, publication, and pivot tests. |
-| S6: Validators | Executable readiness, source-version binding, fresh checks, evaluator review. | `test/validators.test.mjs`, native `repair`. |
-| S7: Execution | Conversation-based preparation, single worker, continuation, repair. | Native `discovery`, `repair`. Needs real models. |
-| S8: Acceptance | Candidate capture, fresh evaluators, per-criterion evidence, delivery checks. | Artifact and acceptance tests. |
-| S9: Recovery | Ownership checks, cancellation, reservations, stopping status, uncertain outcomes. | `test/recovery.test.mjs`, sandbox tests, native `restart`. |
-| S10: Qualification | Bound admission, aggregate campaign accounting, scenario steps, paired comparisons. | Qualification harness, installed native campaigns, [QUALIFICATION.md](QUALIFICATION.md). |
-
-## 11. Preserved Native Findings
-
-The implementation targets OpenCode 2.0.29. The package rejects other versions.
+The [package compatibility policy](../packages/prometheus/README.md#compatibility) defines accepted service versions.
 Key verified facts:
 1. Local package directories require a root entrypoint.
 2. Command lists use a `data` envelope; native session context returns an array.
@@ -274,3 +243,8 @@ Key verified facts:
 7. Native interruption reports active execution, not an idle originating session.
 8. Location activation starts recovery; a service restart alone does not activate saved locations.
 9. Repeated stop paths require one signal operation per owned process group.
+
+The native suite checks these mechanics without paid model requests.
+Live events supply notifications. SQLite records and native facts control recovery.
+
+For implementation coverage, required checks, and remaining work, use [Scenarios](SCENARIOS.md).

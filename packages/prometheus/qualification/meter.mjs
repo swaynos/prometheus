@@ -4,13 +4,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Store } from '../src/store.mjs';
 import { canonical, hash, localPath, requireThat, errorText } from '../src/util.mjs';
+import { requireOpenCodeVersion } from '../src/compatibility.mjs';
 import { nativeFileBoundary, nativeShellBoundary } from './boundary.mjs';
 
 const fixtureTools = new Set(['read', 'glob', 'grep', 'write', 'edit', 'patch', 'apply_patch', 'shell', 'bash', 'question', 'prometheus_control']);
 
 // This plugin meters qualification only. It supplies no continuation or evaluator feedback.
 export default Plugin.define({ id: 'prometheus-qualification-meter', async setup(ctx) {
-  requireThat(ctx.app.version === '2.0.29', 'Qualification supports OpenCode 2.0.29.');
+  requireOpenCodeVersion(ctx.app.version);
   const { directory, fingerprint, caseID, root, scratch, protectedPaths, runtimeState, candidateFault } = ctx.options ?? {};
   requireThat(directory && root && caseID && fingerprint, 'Qualification metering needs an approved campaign.');
   requireThat(canonical(ctx.location.directory) === canonical(root), 'The qualification meter loaded in another workspace.');
