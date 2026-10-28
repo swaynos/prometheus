@@ -11,10 +11,10 @@ Real-model verification remains necessary.
 
 ## Compatibility
 
-`prometheus.openCodeReleaseLine` in [package.json](package.json) defines the accepted OpenCode major.minor release line.
+`prometheus.openCodeMajorVersion` in [package.json](package.json) defines the accepted OpenCode major version.
 The plugin, scenario driver, and campaign meter use this one policy.
-They accept stable patch releases in that line only.
-They reject other lines, prereleases, build suffixes, and malformed versions.
+They accept stable versions across all minor releases in that major.
+They reject other major versions, prereleases, build suffixes, and malformed versions.
 
 From the package directory, inspect the policy without starting a service:
 
@@ -22,10 +22,10 @@ From the package directory, inspect the policy without starting a service:
 node --input-type=module -e 'import { OPENCODE_VERSION_LABEL } from "./src/compatibility.mjs"; console.log(OPENCODE_VERSION_LABEL)'
 ```
 
-Acceptance is a compatibility policy, not proof that every patch release passed verification.
+Acceptance is a compatibility policy, not proof that every release passed verification.
 The exact `@opencode/plugin` and `@opencode/client` dependency pins identify the installed libraries.
 They do not define the accepted service range.
-Change the policy and dependency pins together when adopting another release line.
+Change the policy and dependency pins together when adopting another major version.
 Repeat native verification and retain the exact tested environment before making a support claim.
 
 The managed process boundary currently supports macOS `sandbox-exec`.
