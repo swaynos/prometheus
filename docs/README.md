@@ -9,7 +9,7 @@ Each subject has one detailed reference. Other documents link to that reference.
 | [Project overview](../README.md) | Commands and user workflow. |
 | [Specification](../SPEC.md) | Product requirements and acceptance criteria. |
 | [Package guide](../packages/prometheus/README.md) | Installation, compatibility policy, and package limits. |
-| [Runtime reference](PROMETHEUS.md) | Architecture, records, process boundaries, recovery, and native findings. |
+| [Runtime reference](PROMETHEUS.md) | Native command execution, records, candidate checks, and interruption. |
 
 ## Scenarios and Verification
 
@@ -19,7 +19,7 @@ Scenarios define what to test. Verification defines how to collect and assess th
 | --- | --- |
 | [Scenarios](SCENARIOS.md) | Required behavior and fault scenarios, requirement-to-check map, and evaluation criteria. |
 | [Verification](VERIFICATION.md) | Test execution, evidence classes, comparison rules, and release gates. |
-| [Scenario runner](../packages/prometheus/qualification/README.md) | Admission, manifest fields, execution, checkpoints, and failure handling. |
+| [Native qualification](../packages/prometheus/qualification/README.md) | Scripted checks, retired campaigns, and live-model requirements. |
 
 Accepted service versions come from the package policy.
 Keep exact tested versions and results with private verification reports.

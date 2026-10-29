@@ -7,19 +7,21 @@ import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import metadata from '../package.json' with { type: 'json' };
-import { OPENCODE_MAJOR_VERSION, OPENCODE_VERSION_LABEL, supportsOpenCodeVersion, requireOpenCodeVersion } from '../src/compatibility.mjs';
+import { OPENCODE_MAJOR_VERSION, OPENCODE_MINIMUM_VERSION, OPENCODE_VERSION_LABEL, supportsOpenCodeVersion, requireOpenCodeVersion } from '../src/compatibility.mjs';
 import { serviceVersion, unsupportedVersions } from './versions.mjs';
 
-test('the package policy accepts stable versions across its declared major version', () => {
+test('the package policy accepts stable versions from its minimum native-goal release', () => {
   assert.equal(OPENCODE_MAJOR_VERSION, metadata.prometheus.openCodeMajorVersion);
-  assert.equal(OPENCODE_VERSION_LABEL, `${OPENCODE_MAJOR_VERSION}.x`);
-  for (const minor of [0, 1, 2, 123]) {
-    for (const patch of [0, 1, 2, 123]) {
+  assert.equal(OPENCODE_MINIMUM_VERSION, '2.2.1');
+  assert.equal(OPENCODE_VERSION_LABEL, '>=2.2.1 <3.0.0');
+  for (const minor of [2, 123]) {
+    for (const patch of [1, 2, 123]) {
       const version = `${OPENCODE_MAJOR_VERSION}.${minor}.${patch}`;
       assert.equal(supportsOpenCodeVersion(version), true);
       assert.doesNotThrow(() => requireOpenCodeVersion(version));
     }
   }
+  for (const version of ['2.0.99', '2.1.99', '2.2.0']) assert.equal(supportsOpenCodeVersion(version), false);
   for (const version of unsupportedVersions) {
     assert.equal(supportsOpenCodeVersion(version), false);
     assert.throws(() => requireOpenCodeVersion(version), error =>
