@@ -1,103 +1,51 @@
-# Verification
+# Verification guide
 
-Status: First-release verification is incomplete.
+## Automated checks
 
-The [specification](../SPEC.md) remains the product agreement.
-Use [Scenarios](SCENARIOS.md) to select required behavior, fault cases, and evaluation criteria.
-Use the [runtime reference](PROMETHEUS.md) for architecture, boundaries, and native integration findings.
+From the repository root:
 
-Verification collects evidence for a declared scenario, candidate, and environment.
-A passing result applies to that scope only. It is not general certification.
+```sh
+npm run test:controller
+npm run test:controller:native
+npm test
+git diff --check
+```
+
+The controller script name is retained for compatibility. It now runs command, storage, artifact,
+compatibility, and focused verification tests. There is no execution controller.
+
+Native tests start owned OpenCode services with isolated homes, databases, and configuration.
+They allow only a local scripted provider. They do not use user credentials or paid models.
+They check the packed package, native `/goal`, Linux shell execution, permissions, and fresh evaluation.
+Stop and clean up only the service and files owned by each test.
+
+The browser integration suite remains separate. Browser instructions and profiles are not changed by this migration.
 
 ## Evidence classes
 
-Keep these four classes separate:
+- Unit tests establish local contracts and fault handling.
+- Scripted native tests establish integration mechanics with an exact OpenCode release.
+- Real-model observations establish whether models follow the workflow and select sufficient evidence.
+- Independent product checks establish whether a candidate meets the user's actual requirements.
 
-1. Deterministic tests establish controller mechanics.
-2. Scripted native tests establish integration mechanics.
-3. Real-model tests establish observed model behavior.
-4. Live checks establish external outcomes.
+Do not substitute one class for another. Record the tested OpenCode version and platform.
+Do not describe a broad compatibility policy as a test matrix.
 
-Do not substitute one class for another.
-A scripted provider is not a real model.
-A successful model run does not establish every external outcome.
+## Remaining qualification
 
-## Test execution
+The old campaign runner depended on the removed controller and sandbox. It is retired.
+It rejects old manifests without contacting a service or model.
+Fixtures and independent oracle programs remain as test assets.
+See [native workflow scenarios](SCENARIOS.md) for the replacement observations.
 
-Run these commands from the repository root:
+Any live-model campaign needs a new approved procedure, model, resource allowance, and evidence destination.
+Do not reuse the old aggregate-budget or process-isolation claims.
+Native goal round limits are not an aggregate model-request or cost limit.
 
-```sh
-npm ci
-npm ci --prefix packages/prometheus
-npm test
-npm run test:controller
-npm run test:controller:native
-```
+## Acceptance limits
 
-Requirements and safeguards:
-
-- The native service must satisfy the [package compatibility policy](../packages/prometheus/README.md#compatibility).
-- Native tests create isolated services, configuration, storage, and workspaces.
-- They do not restart the shared service or use paid providers.
-- Scripted tests permit only the local fixture provider.
-- Native crash tests terminate only owned isolated service groups.
-- Process-boundary tests require macOS `sandbox-exec`. Record skips on other platforms.
-- Linux browser support does not establish Linux controller support. The controller process boundary does not support Linux.
-- Controlled destination tests use loopback effects. They do not establish unrelated live outcomes.
-
-New results apply only to the source and environment recorded by that run.
-Keep raw output and private runtime data outside Git, or under ignored `.prometheus-local/`.
-Review evidence before publication.
-
-## Real-model campaigns
-
-Obtain the user's model choice and aggregate allowance before paid execution.
-Declare tasks, fixtures, expected evidence, and stop conditions first.
-Use owned test workspaces rather than product checkouts.
-Retain failures, resource consumption, declared human decisions, and unexpected rescue.
-Do not classify manual repair as unattended success.
-
-The [runner reference](../packages/prometheus/qualification/README.md) owns the execution procedure:
-
-- [Admission](../packages/prometheus/qualification/README.md#admission): inspect and approve the source-bound manifest before execution.
-- [Manifest fields](../packages/prometheus/qualification/README.md#manifest-fields): declare cases, checks, limits, and comparison arms.
-- [Steps](../packages/prometheus/qualification/README.md#steps): declare prompts, native replies, mode changes, and faults.
-- [Checkpoints](../packages/prometheus/qualification/README.md#checkpoints): identify expected states and saved evidence.
-- [Failure and follow-up](../packages/prometheus/qualification/README.md#failure-inspection-and-follow-up): inspect retained results and carry prior consumption.
-
-Unknown effects and unconfirmed stops block follow-up execution.
-Do not reset the allowance or replay an uncertain action.
-
-## Ordinary-Build comparison
-
-Compare prepared-goal execution with ordinary Build under equal declared conditions:
-
-- Use the same fixtures, model, criteria, tool boundaries, and allowances.
-- Run each arm in an isolated workspace.
-- Do not give ordinary Build Prometheus continuation or evaluator feedback.
-- Apply the same external acceptance procedures to both arms.
-- Record accepted completion, false acceptance, request counts, estimated cost, elapsed time, and human interventions.
-- Declare the rubric for false acceptance before execution.
-- Do not compare truncated or incomplete pairs.
-
-The runner enforces the [comparison and resource contract](../packages/prometheus/qualification/README.md#comparison-and-resources).
-Passing a scripted comparison does not establish real-model performance or general superiority.
-
-## Release gates
-
-Release requires:
-
-1. Passing mechanics and native integration checks for the declared candidate and target environment.
-2. Suitable passing evidence for every required [workflow and fault scenario](SCENARIOS.md#mandatory-scenario-catalog).
-3. No observed unauthorized action or false acceptance.
-4. A regression test for each repaired defect, followed by the affected checks.
-5. Review of the final requirements, validator identities, delivered files, and required live outcomes.
-
-An unresolved mandatory criterion or unavailable required boundary blocks release.
-Repeat broader tests when central controls change. Preserve failures after repair.
-Do not remove unmet requirements from the first-release scope.
-
-The runner always reports `releaseQualified: false`.
-Campaign completion cannot replace the final requirement review and required external acceptance.
-
-Writing follows ASD-STE100 sentence conventions. Full dictionary conformity is not verified.
+Native permissions are not an OS sandbox. Candidate hashes detect changes but do not prevent them.
+The evaluator's report is a model judgment backed by references to actual tool results.
+Reference validity alone does not prove semantic correctness or full criterion coverage.
+Required excluded files and remote outcomes need separate observations.
+Missing required evidence must remain unresolved.

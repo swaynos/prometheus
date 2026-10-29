@@ -4,7 +4,7 @@ import { atomic, canonical, hash, id, inside, localPath, requireThat } from './u
 
 const excluded = name => ['.git', '.opencode', 'node_modules', '.DS_Store'].includes(name) || /^\.env(?:\.|$)/.test(name);
 
-export function manifest(directory) {
+export function manifest(directory, { beforeRead = () => {} } = {}) {
   directory = canonical(directory);
   const files = [];
   function visit(relative) {
@@ -22,12 +22,29 @@ export function manifest(directory) {
       } else {
         requireThat(stat.isFile(), `Unsupported candidate entry: ${rel}`, 'candidate');
         requireThat(stat.nlink === 1, `A candidate file has multiple hardlinks: ${rel}`, 'candidate');
+        beforeRead(file);
         files.push({ path: rel, type: 'file', bytes: stat.size, executable: !!(stat.mode & 0o111), hash: hash(fs.readFileSync(file)) });
       }
     }
   }
   visit('');
   return { id: hash(files), files, exclusions: ['.git', '.opencode', 'node_modules', '.env and .env.*', '.DS_Store'] };
+}
+
+// Enumerate paths without reading file contents. Native read permission must be
+// established before verification hashes those contents.
+export function candidatePaths(directory) {
+  const files = [];
+  function visit(current) {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (excluded(entry.name)) continue;
+      const file = path.join(current, entry.name);
+      if (entry.isDirectory()) visit(file);
+      else if (entry.isFile()) files.push(file);
+    }
+  }
+  visit(canonical(directory));
+  return files;
 }
 
 export function capture(directory, destination, { afterFile } = {}) {

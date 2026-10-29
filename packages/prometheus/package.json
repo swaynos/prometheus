@@ -1,12 +1,12 @@
 {
   "name": "opencode-prometheus",
-  "version": "0.1.0",
-  "description": "Conversation-derived goals, persistent repair, and independent acceptance for OpenCode V2.",
+  "version": "0.2.0",
+  "description": "Native OpenCode V2 investigation, decisions, and independent verification.",
   "type": "module",
   "private": true,
   "license": "GPL-3.0-only",
   "engines": { "node": ">=22.22.2 <25" },
-  "prometheus": { "openCodeMajorVersion": 2 },
+  "prometheus": { "openCodeMajorVersion": 2, "minimumOpenCodeVersion": "2.2.1" },
   "exports": { ".": "./index.mjs" },
   "files": ["index.mjs", "src/", "qualification/", "README.md"],
   "scripts": {
@@ -15,5 +15,5 @@
     "qualify": "node qualification/run.mjs",
     "qualification:catalog": "node qualification/catalog.mjs"
   },
-  "dependencies": { "@opencode/plugin": "2.1.2", "@opencode/client": "2.1.2" }
+  "dependencies": { "@opencode/plugin": "2.2.1", "@opencode/client": "2.2.1" }
 }
