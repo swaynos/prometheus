@@ -358,18 +358,12 @@ export async function serveLogin(opts, dependencies = {}) {
         chromium, opts.browser, { headless: false }
       ));
     } else {
-      const hasDisplayOverrides = Object.keys(opts.browser.contextOptions ?? {}).some(key =>
-        ["viewport", "screen", "deviceScaleFactor", "userAgent"].includes(key)
-      );
-      if (opts.browser.identityProfile === undefined && opts.browser.profile === undefined && !hasDisplayOverrides) {
-        opts.browser = { ...opts.browser, identityProfile: "random" };
+      if (opts.browser.identityProfile === true || opts.browser.identityProfile === "random") {
+        opts.browser = validateBrowserConfig({ ...opts.browser, identityProfile: resolveIdentityProfile(opts.browser).id });
       }
       if (opts.browser.automationCompatibility === undefined) {
         const engine = await selectBrowserType(chromium, opts.browser, dependencies.chromium ? dependencies : undefined);
         if (engine === chromium) opts.browser = { ...opts.browser, automationCompatibility: true };
-      }
-      if (opts.browser.identityProfile === true || opts.browser.identityProfile === "random") {
-        opts.browser = validateBrowserConfig({ ...opts.browser, identityProfile: resolveIdentityProfile(opts.browser).id });
       }
       profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "prometheus-login-"));
       const profile = resolveIdentityProfile(opts.browser || {});

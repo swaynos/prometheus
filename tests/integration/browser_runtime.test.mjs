@@ -53,21 +53,31 @@ test("automation compatibility is opt-in and shared by headed and headless launc
   assert.throws(() => browserConfigFromEnv({ PROMETHEUS_BROWSER_AUTOMATION_COMPATIBILITY: "yes" }));
 });
 
-test("automation compatibility hides navigator.webdriver and overrides languages and plugins", async () => {
+test("automation compatibility disables navigator.webdriver while preserving native PluginArray and iframe consistency", async () => {
   const { browser, context } = await createTaskContext(chromium, { channel: "default", automationCompatibility: true });
   try {
     const page = await context.newPage();
     await page.goto("about:blank");
-    const result = await page.evaluate(() => ({
-      webdriver: navigator.webdriver,
-      inNav: "webdriver" in navigator,
-      languages: navigator.languages,
-      plugins: Array.from(navigator.plugins),
-    }));
-    assert.equal(result.webdriver, undefined);
-    assert.equal(result.inNav, false);
-    assert.deepEqual(result.languages, ["en-US", "en"]);
-    assert.deepEqual(result.plugins, [1, 2, 3, 4, 5]);
+    const result = await page.evaluate(() => {
+      const iframe = document.createElement("iframe");
+      document.body.appendChild(iframe);
+      const fw = iframe.contentWindow;
+      return {
+        webdriver: navigator.webdriver,
+        inNav: "webdriver" in navigator,
+        iframeWebdriver: fw.navigator.webdriver,
+        iframeInNav: "webdriver" in fw.navigator,
+        pluginsInstance: navigator.plugins instanceof PluginArray,
+        pluginsCount: navigator.plugins.length,
+        userAgent: navigator.userAgent,
+      };
+    });
+    assert.equal(result.webdriver, false);
+    assert.equal(result.inNav, true);
+    assert.equal(result.iframeWebdriver, false);
+    assert.equal(result.iframeInNav, true);
+    assert.equal(result.pluginsInstance, true);
+    assert.doesNotMatch(result.userAgent, /HeadlessChrome/);
   } finally {
     await browser.close();
   }
@@ -204,7 +214,7 @@ test("the task launch applies context settings and closes the browser if context
   const res = await createTaskContext(chromiumStub, config);
   assert.equal(res.browser, browser);
   assert.equal(res.context, context);
-  assert.ok(res.runtime?.profile?.id);
+  assert.equal(res.runtime?.profile, undefined, "native identity is preserved by default without selecting a random profile");
   assert.match(seen.context.userAgent, /^Mozilla\/5\.0/);
   assert.doesNotMatch(seen.context.userAgent, /HeadlessChrome/);
   assert.equal(seen.context.viewport.width, 1280);
@@ -219,6 +229,9 @@ test("the task launch applies context settings and closes the browser if context
   assert.deepEqual(await createTaskContext(chromiumStub, optOutConfig), { browser, context });
   assert.deepEqual(seen.context, { viewport: { width: 1280, height: 1024 }, locale: "en-GB" });
   assert.deepEqual(seen.launch, { slowMo: 0, headless: true });
+  const firefoxStub = { launch: async () => browser };
+  const ffRes = await createTaskContext(chromiumStub, { channel: "default", identityProfile: "pw-desktop-firefox" }, { firefox: firefoxStub });
+  assert.equal(ffRes.runtime?.profile?.id, "pw-desktop-firefox");
   browser.newContext = async () => { throw new Error("fixture context failure"); };
   await assert.rejects(createTaskContext(chromiumStub, config), /fixture context failure/);
   assert.equal(closed, true);

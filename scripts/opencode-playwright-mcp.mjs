@@ -83,7 +83,7 @@ const TOOLS = [
   { name: "browser_status", description: "Return non-secret browser runtime and page health metadata.", inputSchema: { type: "object", properties: {} } },
   { name: "browser_navigate_back", description: "Go back in history.", inputSchema: { type: "object", properties: {} } },
   { name: "browser_forward", description: "Go forward in history.", inputSchema: { type: "object", properties: {} } },
-  { name: "browser_reload", description: "Reload the current page.", inputSchema: { type: "object", properties: {} } },
+  { name: "browser_reload", description: "Reload the current page after allowing in-flight network requests to settle.", inputSchema: { type: "object", properties: { wait_until: { type: "string", enum: ["commit", "domcontentloaded", "load", "networkidle"] }, timeout: { type: "number", description: "Total reload budget in seconds, bounded by the transport budget." } } } },
   { name: "browser_snapshot", description: "Readable text of the current page (title, URL, body text).", inputSchema: { type: "object", properties: { max_chars: { type: "number" } } } },
   { name: "browser_markdown", description: "Current page rendered as terse Markdown-ish text.", inputSchema: { type: "object", properties: { max_chars: { type: "number" } } } },
   { name: "browser_interactive_elements", description: "List clickable/typeable elements with stable refs.", inputSchema: { type: "object", properties: { limit: { type: "number" } } } },
@@ -540,9 +540,18 @@ const HANDLERS = {
     await activePage().goForward();
     return text(`forward to ${activePage().url()}`);
   },
-  async browser_reload() {
-    await activePage().reload();
-    return text(`reloaded ${activePage().url()}`);
+  async browser_reload(args = {}) {
+    const waitUntil = args.wait_until === undefined ? "load" : args.wait_until;
+    if (!["commit", "domcontentloaded", "load", "networkidle"].includes(waitUntil)) throw new Error("invalid wait_until");
+    const budget = args.timeout !== undefined ? boundedWaitMs(args.timeout) : DEFAULT_TIMEOUT;
+    const page = activePage();
+    const started = Date.now();
+    const remaining = () => Math.max(1, budget - (Date.now() - started));
+    await page.waitForLoadState("networkidle", { timeout: Math.min(2000, remaining()) }).catch(() => {});
+    const resp = await page.reload({ waitUntil, timeout: remaining() });
+    const status = resp ? resp.status() : null;
+    const classification = await navigationClassification(page, status, remaining());
+    return text(`reloaded ${page.url()} (status ${status ?? "n/a"}${classification})`);
   },
   async browser_snapshot(args) {
     const page = activePage();

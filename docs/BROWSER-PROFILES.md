@@ -70,8 +70,8 @@ For profiles, `automationCompatibility` is supported only with Chromium.
 
 ## Default login and explicit variation
 
-If `profile` is omitted, the runtime does not automatically select a preset from the full catalog.
-Managed task contexts can select a random legacy identity when no profile option or display override is set.
+If `profile` and `identityProfile` are omitted, the runtime preserves the native browser identity and does not automatically select a preset or random legacy identity.
+When `automationCompatibility` is enabled on Chromium, managed contexts strip `HeadlessChrome` while retaining the host operating system and launched browser version.
 
 Ordinary login uses CDP on macOS and Linux for `default`, `chromium`, and `chrome`.
 This applies when no enabled profile, context options, launch options, or virtual-display mode is selected.

@@ -306,72 +306,6 @@ export async function applyAutomationCompatibility(context) {
   if (typeof context?.addInitScript === "function") {
     await context.addInitScript(() => {
       try {
-        delete Object.getPrototypeOf(navigator).webdriver;
-      } catch {}
-      try {
-        delete navigator.webdriver;
-      } catch {}
-      if (navigator.webdriver !== undefined) {
-        try {
-          Object.defineProperty(Object.getPrototypeOf(navigator), "webdriver", {
-            get: () => undefined,
-            configurable: true,
-          });
-        } catch {}
-      }
-      try {
-        Object.defineProperty(Object.getPrototypeOf(navigator), "languages", {
-          get: () => ["en-US", "en"],
-          configurable: true,
-        });
-      } catch {
-        try {
-          Object.defineProperty(navigator, "languages", {
-            get: () => ["en-US", "en"],
-            configurable: true,
-          });
-        } catch {}
-      }
-      try {
-        Object.defineProperty(Object.getPrototypeOf(navigator), "plugins", {
-          get: () => [1, 2, 3, 4, 5],
-          configurable: true,
-        });
-      } catch {
-        try {
-          Object.defineProperty(navigator, "plugins", {
-            get: () => [1, 2, 3, 4, 5],
-            configurable: true,
-          });
-        } catch {}
-      }
-      try {
-        if (!window.chrome) {
-          window.chrome = {
-            app: { isInstalled: false, InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" }, RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" } },
-            csi: () => {},
-            loadTimes: () => {},
-            runtime: {},
-          };
-        } else if (!window.chrome.runtime) {
-          window.chrome.runtime = {};
-        }
-      } catch {}
-      try {
-        if (typeof Notification !== "undefined" && Notification.permission === "denied") {
-          try {
-            Object.defineProperty(Notification, "permission", { get: () => "default", configurable: true });
-          } catch {}
-        }
-        if (navigator.permissions && navigator.permissions.query) {
-          const origQuery = navigator.permissions.query.bind(navigator.permissions);
-          navigator.permissions.query = (parameters) =>
-            parameters && parameters.name === "notifications"
-              ? Promise.resolve({ state: Notification.permission || "default", onchange: null, addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false })
-              : origQuery(parameters);
-        }
-      } catch {}
-      try {
         if (/HeadlessChrome/.test(navigator.userAgent)) {
           const cleanUa = navigator.userAgent.replace(/HeadlessChrome/, "Chrome");
           Object.defineProperty(Object.getPrototypeOf(navigator), "userAgent", {
@@ -472,6 +406,13 @@ export function resolveIdentityProfile(selected) {
   return candidates[Math.floor(Math.random() * candidates.length)];
 }
 
+export function nativeChromiumUserAgent(browserVersion, platform = process.platform, channel = "default") {
+  const osToken = platform === "darwin" ? "Macintosh; Intel Mac OS X 10_15_7" : "X11; Linux x86_64";
+  const major = String(browserVersion || "").match(/^\d+/)?.[0] || "157";
+  const suffix = channel === "msedge" ? ` Edg/${major}.0.0.0` : "";
+  return `Mozilla/5.0 (${osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36${suffix}`;
+}
+
 export async function launchExternalCdpContext(chromium, selected, options = {}) {
   if (selected.automationCompatibility === undefined) {
     selected = { ...selected, automationCompatibility: true };
@@ -493,8 +434,7 @@ export async function launchExternalCdpContext(chromium, selected, options = {})
 
     const execPath = resolveChromeExecutablePath(chromium, selected.channel);
     const headless = options.headless ?? selected.launchOptions?.headless ?? (selected.executionMode !== "virtual-display");
-    const defaultUa = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
-    const ua = selected.contextOptions?.userAgent ?? (headless ? defaultUa : undefined);
+    const ua = selected.contextOptions?.userAgent;
     const args = [
       ...(headless ? ["--headless=new"] : []),
       "--remote-debugging-address=127.0.0.1",
@@ -502,7 +442,7 @@ export async function launchExternalCdpContext(chromium, selected, options = {})
       `--user-data-dir=${userDataDir}`,
       "--no-first-run",
       "--no-default-browser-check",
-      "--disable-blink-features=AutomationControlled",
+      ...(selected.automationCompatibility ? ["--disable-blink-features=AutomationControlled"] : []),
       ...(ua ? [`--user-agent=${ua}`] : []),
       "about:blank",
     ];
@@ -578,21 +518,15 @@ export async function launchExternalCdpContext(chromium, selected, options = {})
 
 export async function createTaskContext(chromium, config, engines) {
   let selected = validateBrowserConfig(config);
-  const hasDisplayOverrides = Object.keys(selected.contextOptions ?? {}).some(key =>
-    ["viewport", "screen", "deviceScaleFactor", "userAgent"].includes(key)
-  );
-  if (selected.identityProfile === undefined && selected.profile === undefined && selected.executionMode !== "external-cdp" && !hasDisplayOverrides) {
-    selected = { ...selected, identityProfile: "random" };
-  }
-  if (selected.automationCompatibility === undefined) {
-    const engine = (selected.profile ? getBrowserProfile(selected.profile) : null)?.engine ?? "chromium";
-    if (engine === "chromium") {
-      selected = { ...selected, automationCompatibility: true };
-    }
-  }
   // Resolve legacy randomness exactly once; downstream settings and metadata use the same ID.
   if (selected.identityProfile === true || selected.identityProfile === "random") {
     selected = validateBrowserConfig({ ...selected, identityProfile: resolveIdentityProfile(selected).id });
+  }
+  if (selected.automationCompatibility === undefined) {
+    const engine = configuredProfile(selected)?.engine ?? "chromium";
+    if (engine === "chromium") {
+      selected = { ...selected, automationCompatibility: true };
+    }
   }
   if (selected.executionMode === "virtual-display" && (!process.env.DISPLAY || process.env.PROMETHEUS_VIRTUAL_DISPLAY !== "1")) {
     throw new Error("virtual-display mode requires the managed Xvfb service launcher");
@@ -608,6 +542,10 @@ export async function createTaskContext(chromium, config, engines) {
   const browserType = await selectBrowserType(chromium, selected, engines);
   const browser = await browserType.launch(browserLaunchOptions(selected));
   try {
+    const browserVersion = browser.version?.() ?? null;
+    if (selected.automationCompatibility && !contextOptions.userAgent) {
+      contextOptions.userAgent = nativeChromiumUserAgent(browserVersion, process.platform, selected.channel);
+    }
     const context = await browser.newContext(contextOptions);
     if (selected.automationCompatibility) {
       await applyAutomationCompatibility(context);
@@ -615,7 +553,10 @@ export async function createTaskContext(chromium, config, engines) {
     if (profile) {
       await applyBrowserProfile(context, profile);
     }
-    return { browser, context, ...(configuredProfile(selected) ? { runtime: { ...browserRuntimeInfo(selected), browserVersion: browser.version?.() ?? null } } : {}) };
+    const runtime = configuredProfile(selected) || selected.automationCompatibility
+      ? { ...browserRuntimeInfo(selected), contextOptions: structuredClone(contextOptions), browserVersion }
+      : undefined;
+    return { browser, context, ...(runtime ? { runtime } : {}) };
   }
   catch (error) { await browser.close().catch(() => {}); throw error; }
 }
