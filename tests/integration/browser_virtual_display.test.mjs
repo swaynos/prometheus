@@ -1,50 +1,37 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { createInterface } from "node:readline";
 import { access, mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import http from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import os from "node:os";
 import path from "node:path";
+import { spawnMcpClient, hasXvfb } from "./helpers.mjs";
 
-// The same local fixture can verify a deployed service without loading real accounts.
-const server = process.env.PROMETHEUS_TEST_BROWSER_SERVER || path.resolve(import.meta.dirname, "../../scripts/opencode-playwright-mcp.mjs");
-const hasXvfb = spawnSync("sh", ["-c", "command -v Xvfb && command -v xvfb-run && command -v xauth"], { stdio: "ignore" }).status === 0;
 const isLinux = process.platform === "linux";
 
 function client(configDir, extraEnv = {}) {
-  const child = spawn(process.execPath, [server], { env: { ...process.env,
-    PROMETHEUS_CONFIG_DIR: configDir, PROMETHEUS_VIRTUAL_DISPLAY: "", ...extraEnv }, stdio: ["pipe", "pipe", "pipe"] });
-  let stderr = "", id = 0;
-  const pending = new Map();
-  const exited = once(child, "exit");
-  child.stderr.on("data", chunk => { stderr += chunk; });
-  createInterface({ input: child.stdout }).on("line", line => {
-    const result = JSON.parse(line); // stdout must contain JSON-RPC only.
-    pending.get(result.id)?.(result);
-  });
-  return { child, exited, errors: () => stderr,
-    call(name, args = {}) {
-      const requestId = ++id;
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => { pending.delete(requestId); reject(new Error(`RPC timeout: ${stderr}`)); }, 20000);
-        pending.set(requestId, message => {
-          clearTimeout(timer); pending.delete(requestId);
-          if (message.result.isError) reject(new Error(message.result.content[0].text));
-          else resolve(message.result.content[0].text);
-        });
-        child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "tools/call", params: { name, arguments: args } })}\n`);
-      });
+  const c = spawnMcpClient({ PROMETHEUS_CONFIG_DIR: configDir, PROMETHEUS_VIRTUAL_DISPLAY: "", ...extraEnv }, { timeoutMs: 20000, captureStderr: true });
+  return {
+    child: c.child,
+    exited: c.exited,
+    errors: c.errors,
+    async call(name, args = {}) {
+      const result = await c.call(name, args);
+      if (result.isError) throw new Error(result.content[0].text);
+      return result.content[0].text;
     },
-    async close() { child.stdin.end(); return exited; },
+    close: c.close,
   };
 }
 
 async function config() {
   const dir = await mkdtemp(path.join(os.tmpdir(), "cw-xvfb-"));
-  await writeFile(path.join(dir, "prometheus-browser.json"), JSON.stringify({ channel: process.env.PROMETHEUS_TEST_BROWSER_CHANNEL || "default", automationCompatibility: true, executionMode: "virtual-display" }));
+  await writeFile(path.join(dir, "prometheus-browser.json"), JSON.stringify({
+    channel: process.env.PROMETHEUS_TEST_BROWSER_CHANNEL || "default",
+    automationCompatibility: true,
+    executionMode: "virtual-display",
+  }));
   return dir;
 }
 
@@ -60,7 +47,6 @@ test("missing Xvfb fails without falling back to the physical display", { timeou
 test("service wraps the real MCP process and keeps stdio and exit status intact", { skip: !isLinux, timeout: 10000 }, async () => {
   const dir = await config();
   try {
-    // Mock only the X server boundary. The real MCP process handles the request.
     await writeFile(path.join(dir, "xvfb-run"), '#!/bin/sh\n[ "$1" = "--auto-servernum" ] || exit 91\n[ "$2" = "--server-args=-screen 0 1280x1024x24 -nolisten tcp" ] || exit 92\nshift 2\nDISPLAY=:123 exec "$@"\n', { mode: 0o700 });
     const c = client(dir, { PATH: dir });
     try {
@@ -96,7 +82,6 @@ test("real concurrent Xvfb services render headed browsers and release displays 
     await Promise.all(clients.map(async c => {
       await c.call("browser_navigate", { url: "data:text/html,<title>virtual fixture</title>" });
       const evidence = JSON.parse(await c.call("browser_evaluate", { expression: "JSON.stringify({ua:navigator.userAgent,width:innerWidth,height:innerHeight,screenWidth:screen.width,screenHeight:screen.height})" }));
-      // browser_evaluate returns the string result directly.
       const observed = typeof evidence === "string" ? JSON.parse(evidence) : evidence;
       assert.doesNotMatch(observed.ua, /HeadlessChrome/);
       assert.equal(observed.width, 1280); assert.equal(observed.height, 1024);

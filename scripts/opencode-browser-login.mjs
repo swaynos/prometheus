@@ -1,23 +1,6 @@
 #!/usr/bin/env node
-// opencode-browser-login.mjs
-//
-// Headed login helper. Ordinary Chromium login launches the selected browser
-// directly and attaches over CDP; emulation uses a Playwright launcher. A person completes a
-// required login here; the approved Playwright storage state is saved through
-// opencode-browser-state.mjs (owner-only, origin-scoped) and later loaded
-// privately by the task MCP server. This helper never performs task work
-// and never prints state values.
-//
-// start opens a detached login worker and returns. The person replies when
-// ready; only a later complete command captures state. No login polling or
-// human deadline. Task access must be checked after capture.
-//
-// CLI:
-//   start --config-dir <dir> --name <name> --url <https-login-url>
-//         --origin <https-origin> [--origin ...] [--session-storage]
-//   complete|cancel|pending --config-dir <dir> --name <name>
-//   status  --config-dir <dir> [--name <name>]   (metadata only)
-//   remove  --config-dir <dir> --name <name>
+// Headed login helper. Saves approved origin state via opencode-browser-state.mjs
+// only after explicit user completion. Never prints state values or polls for login.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -28,37 +11,40 @@ import net from "node:net";
 import {
   assertValidName,
   assertSafeSessionsDir,
+  hostMatchesCookieDomain,
   saveState,
   statMetadata,
   listStates,
   removeState,
 } from "./opencode-browser-state.mjs";
-
-import { browserLaunchOptions, browserContextOptions, browserConfigFromEnv, applyAutomationCompatibility, applyBrowserProfile, resolveIdentityProfile, selectBrowserType, validateBrowserConfig, launchExternalCdpContext } from "./opencode-browser-runtime.mjs";
+import {
+  browserLaunchOptions,
+  browserContextOptions,
+  browserConfigFromEnv,
+  applyAutomationCompatibility,
+  applyBrowserProfile,
+  resolveIdentityProfile,
+  selectBrowserType,
+  validateBrowserConfig,
+  launchExternalCdpContext,
+} from "./opencode-browser-runtime.mjs";
 
 const OPERATION_TIMEOUT_MS = 30_000;
 
 class LoginError extends Error {}
 
-// --- argument parsing (repeatable --origin) --------------------------------
-
 function parseArgs(argv) {
   const out = { _: [], origin: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (!a.startsWith("--")) {
-      out._.push(a);
-      continue;
-    }
+    if (!a.startsWith("--")) { out._.push(a); continue; }
     const key = a.slice(2);
     const next = argv[i + 1];
     const value = next === undefined || next.startsWith("--") ? true : (i++, next);
     if (key === "origin") {
       if (value === true) throw new LoginError("--origin requires a value");
       out.origin.push(value);
-    } else {
-      out[key] = value;
-    }
+    } else out[key] = value;
   }
   return out;
 }
@@ -69,50 +55,29 @@ function requireConfigDir(args) {
   return dir;
 }
 
-// Validate start arguments fully, BEFORE any browser launch. Returns a
-// normalised option object.
 export function validateStartArgs(args) {
   const configDir = requireConfigDir(args);
   if (!args.name || args.name === true) throw new LoginError("--name is required");
-  try {
-    assertValidName(args.name);
-  } catch (err) {
-    throw new LoginError(err instanceof Error ? err.message : String(err));
-  }
+  try { assertValidName(args.name); }
+  catch (err) { throw new LoginError(err instanceof Error ? err.message : String(err)); }
   if (!args.url || args.url === true) throw new LoginError("start requires --url");
   if (!args.origin?.length) throw new LoginError("start requires at least one --origin");
 
   let loginUrl;
-  try {
-    loginUrl = new URL(args.url);
-  } catch {
-    throw new LoginError("--url must be an https URL");
-  }
+  try { loginUrl = new URL(args.url); } catch { throw new LoginError("--url must be an https URL"); }
   if (loginUrl.protocol !== "https:") throw new LoginError("--url must be https");
 
   const origins = [];
   for (const raw of args.origin) {
     let url;
-    try {
-      url = new URL(raw);
-    } catch {
-      throw new LoginError(`--origin must be a bare https origin: ${raw}`);
-    }
+    try { url = new URL(raw); } catch { throw new LoginError(`--origin must be a bare https origin: ${raw}`); }
     if (url.protocol !== "https:") throw new LoginError(`--origin must be https: ${raw}`);
-    // Compare against the raw string: new URL() normalises "https://host" and
-    // "https://host/" to the same origin, so a trailing slash or any path is
-    // only detectable before normalisation.
-    if (raw !== url.origin) {
-      throw new LoginError(`--origin must be a bare origin (no path): ${raw}`);
-    }
+    if (raw !== url.origin) throw new LoginError(`--origin must be a bare origin (no path): ${raw}`);
     if (!origins.includes(url.origin)) origins.push(url.origin);
   }
-
-  const originHosts = new Set(origins.map((o) => new URL(o).host));
-  if (!originHosts.has(loginUrl.host)) {
+  if (!origins.some((o) => new URL(o).host === loginUrl.host)) {
     throw new LoginError("--url host must be one of the configured --origin hosts");
   }
-
   for (const key of ["complete-selector", "complete-url", "cookie", "timeout"]) {
     if (args[key] !== undefined) throw new LoginError(`--${key} is not used by user-confirmed login; use start, then complete after the user's reply`);
   }
@@ -128,26 +93,15 @@ export function validateStartArgs(args) {
   };
 }
 
-// --- headed capture --------------------------------------------------------
-
 function assertGraphicalSession() {
   if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
     throw new LoginError("headed login requires a graphical session (DISPLAY or WAYLAND_DISPLAY)");
   }
 }
 
-function cookieMatchesOrigins(cookie, origins) {
-  const domain = String(cookie.domain || "").replace(/^\./, "");
-  return origins.some((origin) => {
-    const host = new URL(origin).hostname;
-    return host === domain || host.endsWith(`.${domain}`);
-  });
-}
-
-// storageState() can open temporary pages and intercept their requests. Never
-// call it in the login context, including final capture.
 export async function readApprovedState(context, origins) {
   const approved = new Set(origins);
+  const hosts = origins.map((origin) => new URL(origin).hostname);
   const states = new Map();
   for (const page of context.pages()) {
     const origin = new URL(page.url()).origin;
@@ -160,7 +114,7 @@ export async function readApprovedState(context, origins) {
     states.set(origin, entry);
   }
   return {
-    cookies: (await context.cookies()).filter((cookie) => cookieMatchesOrigins(cookie, origins)),
+    cookies: (await context.cookies()).filter((cookie) => hosts.some((host) => hostMatchesCookieDomain(host, cookie.domain))),
     origins: [...states.values()],
   };
 }
@@ -177,24 +131,18 @@ async function beforeDeadline(action, deadline) {
   } finally { clearTimeout(timer); }
 }
 
-// Capture session storage per approved origin, only when explicitly requested.
 async function captureSessionStorage(page, origins) {
-  const result = {};
   let origin;
-  try {
-    origin = new URL(page.url()).origin;
-  } catch {
-    return undefined;
-  }
+  try { origin = new URL(page.url()).origin; } catch { return undefined; }
   if (!origins.includes(origin)) return undefined;
-  const snapshot = await page.evaluate(() => ({ origin: location.origin, entries: Object.fromEntries(Object.keys(window.sessionStorage).map((key) => [key, window.sessionStorage.getItem(key)])) }));
+  const snapshot = await page.evaluate(() => ({
+    origin: location.origin,
+    entries: Object.fromEntries(Object.keys(window.sessionStorage).map((key) => [key, window.sessionStorage.getItem(key)])),
+  }));
   if (snapshot.origin !== origin) throw new LoginError("login page moved during state capture; confirm again when ready");
-  const entries = snapshot.entries;
-  if (entries && Object.keys(entries).length) result[origin] = entries;
-  return Object.keys(result).length ? result : undefined;
+  return snapshot.entries && Object.keys(snapshot.entries).length ? { [origin]: snapshot.entries } : undefined;
 }
 
-// A private Unix socket carries commands and metadata only, never browser state.
 function loginSocket(configDir, name) {
   assertValidName(name);
   assertSafeSessionsDir(configDir);
@@ -228,8 +176,7 @@ export async function loginCommand(configDir, name, action) {
     socket.once("end", () => {
       try {
         const result = JSON.parse(data);
-        if (result.error) reject(new LoginError(result.error));
-        else resolve(result);
+        result.error ? reject(new LoginError(result.error)) : resolve(result);
       } catch { reject(new LoginError("login worker closed without a result; inspect saved state before retrying")); }
     });
   });
@@ -238,8 +185,9 @@ export async function loginCommand(configDir, name, action) {
 export async function startLogin(opts, dependencies = {}) {
   const socketPath = loginSocket(opts.configDir, opts.name);
   const existing = fs.lstatSync(socketPath, { throwIfNoEntry: false });
-  if ((await loginCommand(opts.configDir, opts.name, "pending")).status !== "not-running") throw new LoginError("login window already open; ask the user to finish, then complete it");
-  // Never unlink another concurrent starter's newly bound socket.
+  if ((await loginCommand(opts.configDir, opts.name, "pending")).status !== "not-running") {
+    throw new LoginError("login window already open; ask the user to finish, then complete it");
+  }
   if (existing && fs.lstatSync(socketPath, { throwIfNoEntry: false })?.ino === existing.ino) fs.unlinkSync(socketPath);
   const child = (dependencies.fork || fork)(fileURLToPath(import.meta.url), ["worker"], {
     detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"],
@@ -276,8 +224,6 @@ export async function captureConfirmedState(context, opts) {
   return { storageState, sessionStorage: opts.captureSessionStorage ? sessionStorage : undefined };
 }
 
-// Select before opening any page, never as a retry after a site denies access.
-// Existing contexts cannot receive Playwright creation-time emulation settings.
 export function loginBrowserConfig(config) {
   const selected = validateBrowserConfig(config);
   if (selected.executionMode === "external-cdp") return selected;
@@ -296,13 +242,9 @@ export async function serveLogin(opts, dependencies = {}) {
   let context, cdpBrowser, loginPage, profileDir, closing, busy = false, listening = false, ready = false;
   const closeBrowser = async () => {
     if (cdpBrowser) {
-      // Close only our handoff tab. Browser.close disconnects a CDP attachment;
-      // the runtime terminates Chrome only when it launched that process itself.
       await loginPage?.close().catch(() => {});
       await cdpBrowser.close().catch(() => {});
-    } else {
-      await context?.close().catch(() => {});
-    }
+    } else await context?.close().catch(() => {});
   };
   const server = net.createServer();
   const cleanup = () => closing ||= (async () => {
@@ -339,13 +281,10 @@ export async function serveLogin(opts, dependencies = {}) {
         try {
           if (action === "complete") {
             const captured = await beforeDeadline(() => captureConfirmedState(context, opts), Date.now() + OPERATION_TIMEOUT_MS);
-            // Save only after the bounded read succeeded, never after a timeout.
-            saveState({ configDir: opts.configDir, name: opts.name, origins: opts.origins,
-              ...captured, verification: { method: "user-confirmed" } });
+            saveState({ configDir: opts.configDir, name: opts.name, origins: opts.origins, ...captured, verification: { method: "user-confirmed" } });
           }
           await cleanup();
-          socket.end(JSON.stringify({ status: action === "complete" ? "saved" : "cancelled", name: opts.name,
-            ...(action === "complete" ? { authentication: "unverified" } : {}) }));
+          socket.end(JSON.stringify({ status: action === "complete" ? "saved" : "cancelled", name: opts.name, ...(action === "complete" ? { authentication: "unverified" } : {}) }));
         } catch (error) {
           socket.end(JSON.stringify({ error: error instanceof LoginError ? error.message : "login operation failed; inspect pending status and saved-state metadata before retrying" }));
           busy = false;
@@ -354,35 +293,26 @@ export async function serveLogin(opts, dependencies = {}) {
     });
     const { chromium } = dependencies.chromium ? dependencies : await import("playwright");
     if (opts.browser.executionMode === "external-cdp") {
-      ({ browser: cdpBrowser, context } = await (dependencies.launchExternalCdpContext || launchExternalCdpContext)(
-        chromium, opts.browser, { headless: false }
-      ));
+      ({ browser: cdpBrowser, context } = await (dependencies.launchExternalCdpContext || launchExternalCdpContext)(chromium, opts.browser, { headless: false }));
     } else {
       if (opts.browser.identityProfile === true || opts.browser.identityProfile === "random") {
         opts.browser = validateBrowserConfig({ ...opts.browser, identityProfile: resolveIdentityProfile(opts.browser).id });
       }
-      if (opts.browser.automationCompatibility === undefined) {
-        const engine = await selectBrowserType(chromium, opts.browser, dependencies.chromium ? dependencies : undefined);
-        if (engine === chromium) opts.browser = { ...opts.browser, automationCompatibility: true };
+      const engines = dependencies.chromium ? dependencies : undefined;
+      const browserType = await selectBrowserType(chromium, opts.browser, engines);
+      if (opts.browser.automationCompatibility === undefined && browserType === chromium) {
+        opts.browser = { ...opts.browser, automationCompatibility: true };
       }
       profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "prometheus-login-"));
       const profile = resolveIdentityProfile(opts.browser || {});
       const contextOpts = browserContextOptions(opts.browser);
-      if (profile?.userAgent && !contextOpts.userAgent) {
-        contextOpts.userAgent = profile.userAgent;
-      }
-      const browserType = await selectBrowserType(chromium, opts.browser, dependencies.chromium ? dependencies : undefined);
+      if (profile?.userAgent && !contextOpts.userAgent) contextOpts.userAgent = profile.userAgent;
       context = await browserType.launchPersistentContext(profileDir, { ...browserLaunchOptions(opts.browser, false), ...contextOpts });
-      if (opts.browser?.automationCompatibility) {
-        await applyAutomationCompatibility(context);
-      }
-      if (profile) {
-        await applyBrowserProfile(context, profile);
-      }
+      if (opts.browser?.automationCompatibility) await applyAutomationCompatibility(context);
+      if (profile) await applyBrowserProfile(context, profile);
     }
     if (closing) { await closeBrowser(); if (profileDir) fs.rmSync(profileDir, { recursive: true, force: true }); return; }
     context.once("close", () => { void cleanup(); });
-    // Never navigate an existing user's tab in an attached browser.
     loginPage = cdpBrowser ? await context.newPage() : context.pages()[0] ?? await context.newPage();
     if (closing) { await closeBrowser(); return; }
     await loginPage.goto(opts.url, { waitUntil: "domcontentloaded", timeout: OPERATION_TIMEOUT_MS });
@@ -394,41 +324,25 @@ export async function serveLogin(opts, dependencies = {}) {
   }
 }
 
-// --- metadata-only status / remove -----------------------------------------
-
 function status(args) {
   const configDir = requireConfigDir(args);
   if (args.name && args.name !== true) {
     const meta = statMetadata(configDir, args.name);
-    if (!meta) {
-      // The lookup itself succeeded: it correctly reports that no record
-      // exists. That is a normal, successful query, not an error.
-      process.stdout.write(`[missing] ${args.name}\n`);
-      return 0;
-    }
-    process.stdout.write(`[${meta.name}] origins=${meta.origins.join(",")} capturedAt=${meta.capturedAt}\n`);
+    process.stdout.write(meta ? `[${meta.name}] origins=${meta.origins.join(",")} capturedAt=${meta.capturedAt}\n` : `[missing] ${args.name}\n`);
     return 0;
   }
   const rows = listStates(configDir);
-  if (!rows.length) {
-    process.stdout.write("No captured sessions\n");
-    return 0;
-  }
-  for (const meta of rows) {
-    process.stdout.write(`[${meta.name}] origins=${(meta.origins || []).join(",")} capturedAt=${meta.capturedAt ?? "?"}\n`);
-  }
+  if (!rows.length) { process.stdout.write("No captured sessions\n"); return 0; }
+  for (const meta of rows) process.stdout.write(`[${meta.name}] origins=${(meta.origins || []).join(",")} capturedAt=${meta.capturedAt ?? "?"}\n`);
   return 0;
 }
 
 function remove(args) {
   const configDir = requireConfigDir(args);
   if (!args.name || args.name === true) throw new LoginError("--name is required for remove");
-  const removed = removeState(configDir, args.name);
-  process.stdout.write(removed ? `Removed captured session "${args.name}"\n` : `No captured session "${args.name}"\n`);
+  process.stdout.write(removeState(configDir, args.name) ? `Removed captured session "${args.name}"\n` : `No captured session "${args.name}"\n`);
   return 0;
 }
-
-// --- CLI -------------------------------------------------------------------
 
 async function main(argv) {
   const args = parseArgs(argv);
@@ -456,21 +370,12 @@ async function main(argv) {
     case "remove":
       return remove(args);
     default:
-      process.stderr.write(
-        "usage: opencode-browser-login.mjs <start|complete|cancel|pending|status|remove> --config-dir <dir> [--name <name>] ...\n",
-      );
+      process.stderr.write("usage: opencode-browser-login.mjs <start|complete|cancel|pending|status|remove> --config-dir <dir> [--name <name>] ...\n");
       throw new LoginError(action ? `unknown action: ${action}` : "no action given");
   }
 }
 
-// Compare canonical (symlink-resolved) paths with fileURLToPath rather than
-// path.resolve(...pathname): on macOS the config dir is a /var -> /private/var
-// symlink and paths may contain spaces, either of which breaks a lexical match
-// and silently skips the CLI body.
-const invokedDirectly =
-  process.argv[1] && fs.realpathSync(fileURLToPath(import.meta.url)) === fs.realpathSync(process.argv[1]);
-
-if (invokedDirectly) {
+if (process.argv[1] && fs.realpathSync(fileURLToPath(import.meta.url)) === fs.realpathSync(process.argv[1])) {
   main(process.argv.slice(2))
     .then((code) => { if (code !== null) process.exit(code ?? 0); })
     .catch((err) => {

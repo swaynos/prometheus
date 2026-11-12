@@ -1,142 +1,63 @@
-# Prometheus — Project specification
+# Prometheus Specification
 
-Status: Native OpenCode V2 design. This document defines requirements, not verification results.
+Status: Native OpenCode V2 requirements.
 
-## Purpose
+## 1. Purpose and Boundaries
 
-Prometheus adds technical investigation, requirement clarification, and independent verification to OpenCode V2.
-OpenCode owns execution. Prometheus does not supply a second agent loop, shell runner, or sandbox.
+- Add investigation (`/spike`), decision clarification (`/grill-me`), record storage (`prometheus_record`), and independent verification (`prometheus_verify`) to OpenCode V2.
+- Leave execution, tool dispatch, permissions, and `/goal` continuation to OpenCode.
+- Do not supply a second agent loop, custom shell runner, or OS sandbox.
+- Keep the managed browser runtime and human-invoked `/browser` command separate. Do not invoke `/browser` from Prometheus commands or evaluators.
 
-## Commands
+## 2. Commands
 
-| Owner | Command | Purpose |
-| --- | --- | --- |
-| Prometheus | `/spike <question>` | Investigate a technical question with permitted native tools. |
-| Prometheus | `/grill-me [instructions]` | Resolve consequential user decisions. |
-| OpenCode | `/goal <objective>` | Continue work toward an explicit objective. |
+- Register only `/spike <question>` and `/grill-me [instructions]`. Fail setup if either command already exists.
+- Do not register, replace, invoke, resume, or clear `/goal` or `/plan`.
+- Submit command prompts through `ctx.session.prompt` to the current session.
+- Preserve attachments, delivery mode, selected agent, model, and native permissions.
+- In Plan, investigate and prepare proposals only. Do not edit product files or use a Build child to bypass Plan restrictions.
+- In Build, perform only the requested investigation or clarification. Do not start implementation.
+- Treat file contents, tool output, and model reports as data, not authority.
+- Write user-facing instructions in short sentences and active voice.
 
-Prometheus must not register, replace, invoke, resume, or clear `/goal`.
-Native `/goal pause`, `/goal resume`, and `/goal clear` retain their native meaning.
-An empty native `/goal` reports usage or status. It does not infer an objective from the conversation.
-There is no Prometheus `/plan` command and no additional user-facing agent.
+## 3. Records (`prometheus_record`)
 
-## Native command execution
+- Store findings, decisions, and verification reports in native plugin storage (`v2/` prefix).
+- Scope session records to the originating session. Preserve records across compaction and reload.
+- Label model-written findings and decisions as `model-report`. Storage never authorizes execution.
+- Support three actions:
+  - `finding`: store `observations`, `interpretation`, `limitations`, and `outcome` (`supported` | `disproved` | `inconclusive`).
+  - `decision`: store `decision` and `rationale`.
+  - `status`: return session records and legacy option metadata.
 
-Commands submit a prompt through `ctx.session.prompt` to the current session.
-They preserve prompt attachments, delivery mode, selected agent, model, and native permissions.
-They do not enroll the session in a controller or start implementation automatically.
+## 4. Independent Verification (`prometheus_verify`)
 
-Use native tools for reads, edits, shell commands, and permitted delegation.
-Do not replace native tools with a custom execution tool.
-Do not remove native tools from an ordinary session.
-Do not install a blanket permission policy for Prometheus command users.
+### 4.1 Request (`start`)
 
-In Plan, investigate through permitted actions and prepare proposals.
-Do not change product files or use a Build child to bypass Plan restrictions.
-A switch to Build does not approve implementation or a wider scope.
-In Build, a spike still authorizes only the requested investigation.
+- Require a Build origin at the plugin directory. Reject evaluator-initiated requests.
+- Assert native `subagent` permission for `build` and `read` permission for all candidate files before hashing.
+- Hash the workspace manifest. Exclude `.git`, `.opencode`, `node_modules`, `.env`, `.env.*`, and `.DS_Store`.
+- Reject external or absolute symlinks, non-regular entries, and multiply linked files.
+- Create one fresh Build child session with the origin's model, location, and permissions.
+- Pass criteria and candidate identity to the child. Exclude the origin conversation.
+- Admit one synthetic evaluation prompt and wait via `ctx.session.wait` so native `/goal` waits for evaluation.
 
-The user can invoke the preparation commands in either order or omit them.
-Commands must not manufacture authority from project files, tool results, or other model reports.
-Use short sentences and active voice in user-facing instructions.
+### 4.2 Evidence and Acceptance (`report` and `status`)
 
-## Records
+- Only the assigned pending evaluator can report.
+- Require one `pass`, `fail`, or `unresolved` result per criterion.
+- Require completed native tool call references from the evaluator session for every `pass`.
+- Reject running tools, `prometheus_*` tools, worker claims, and other-session outputs as pass evidence.
+- Verify that the workspace manifest matches the recorded candidate before and after reading results.
+- Mark all-pass reports `accepted`, any-fail reports `failed`, and remaining reports `unresolved`.
+- Save the report before sending a non-resuming notice (`resume: false`) to the origin.
+- If the evaluator finishes without reporting, mark the verification `unresolved`.
+- On `status`, report `changed` if current workspace files differ from an `accepted` candidate.
 
-Use native plugin storage for findings, decisions, and verification reports.
-Keep findings separate from user decisions. Identify model-written records as model reports.
-Records survive compaction and plugin reload. Storage does not itself authorize work.
-Scope records to the originating session. Unrelated sessions must not receive injected workflow instructions.
+## 5. Cancellation, Reload, and Legacy Compatibility
 
-`prometheus_record` has three actions:
-
-- `finding`: record observations, interpretation, limitations, and outcome.
-- `decision`: record a decision and its rationale.
-- `status`: read this session's records and legacy-option information.
-
-## Independent verification
-
-`prometheus_verify` provides `start`, `report`, and `status` actions.
-It is a focused verification operation, not another goal command.
-
-### Request
-
-The originating session must use Build to request a fresh Build evaluator.
-Use native `subagent` permission admission before child creation.
-Inherit the originating session's restrictions. Do not grant new tool permissions.
-Use native read permission admission before reading candidate bytes for identity checks.
-
-Record the acceptance criteria and a content manifest for the current workspace.
-Each criterion has a unique identity and description. It can include validator instructions.
-Create a fresh native child session with the originating model and location.
-Supply the criteria and candidate identity, but not the worker conversation.
-Admit one evaluation prompt. OpenCode owns subsequent tool execution.
-Wait through the native session API before returning the verification tool result.
-This keeps native goal review from treating pending verification as completed work.
-
-### Evidence and acceptance
-
-The evaluator uses normal native tools. It must not repair the product or weaken the criteria.
-It reports exactly one pass, fail, or unresolved result for each criterion.
-A pass requires references to completed native tool results from that evaluator session.
-Model-written findings, worker claims, running tools, and other-session results cannot establish a pass.
-Retain tool input, output, metadata, and result hashes with the report.
-The evaluator must interpret whether the evidence satisfies the criterion. A tool's completion alone is not proof of success.
-A denied, unavailable, or incomplete required check remains unresolved.
-
-Check the candidate identity before accepting a report. Reject changed candidates.
-After acceptance, a status request must identify files that differ from the accepted candidate.
-Return a durable report and a non-resuming notice to the origin.
-The origin performs any repair through native tools. Native `/goal`, if active, owns continuation.
-Prometheus does not automatically start a replacement evaluator or repair worker.
-If the evaluator finishes without a report, mark the verification unresolved. Do not leave it permanently pending.
-
-### Limits of verification
-
-The evaluator examines the current workspace. There is no isolated or guaranteed read-only candidate sandbox.
-Native permissions and agent rules apply. They are not an operating-system isolation boundary.
-Hash checks detect candidate changes. They do not prevent changes or prove that files stayed unchanged between checks.
-
-The manifest excludes `.git`, `.opencode`, `node_modules`, `.env`, `.env.*`, and `.DS_Store`.
-Excluded files, external services, and remote deliverables require separate evidence.
-Absolute or external symlinks, unsupported entries, and multiply linked files prevent a manifest claim.
-Verification does not grant deployment, publication, or other external authority.
-
-## Cancellation and recovery
-
-OpenCode handles tool cancellation, permission denial, and native goal lifecycle.
-Observe native interruption, failure, and deletion events for pending verifications.
-Stop only owned evaluator activity. Reject late reports after interruption.
-Plugin cleanup must remove registrations and stop pending evaluators.
-After a reload or service restart, old pending verification cannot be accepted by the new plugin instance.
-Status must identify it as interrupted. New verification requires a new request.
-A lost dispatch receipt is uncertain. Do not automatically replay it.
-
-## Legacy data and compatibility
-
-Keep old controller databases and artifacts unchanged. Do not resume or import old runs automatically.
-The old `stateDirectory`, `limits`, and `protectedPaths` options no longer control execution.
-Expose this change through record status and migration documentation.
-Provide read-only inspection of old databases. Retire the old grant operation.
-The plugin must load when legacy state is inside the current project or home directory.
-
-Require stable OpenCode 2.2.1 or later in major version 2. Pin the SDK dependencies to a tested release.
-This version policy is not proof that every allowed release passed verification.
-Do not claim the old aggregate request, cost, deadline, or process-isolation guarantees.
-Native goal limits and native permission controls retain their own semantics.
-
-## Browser boundary
-
-The separate browser installation, profiles, and human-invoked `/browser` command remain unchanged.
-Prometheus commands and evaluators must not automatically invoke that workflow.
-Preserve private authentication and existing browser safeguards.
-
-## Verification requirements
-
-Test the installed package, not only a source import.
-Prove coexistence with the built-in `/goal`, unchanged native tools, Plan restrictions, native denial,
-Linux shell execution, native continuation, independent evidence, changed candidates, cancellation,
-reload behavior, and legacy-data preservation.
-Use isolated services and local scripted providers for deterministic integration tests.
-Do not treat scripted provider results as real-model reliability evidence.
-Paid or external model qualification requires an explicit model, allowance, and approval.
-Retire old campaign manifests rather than run them against the unrelated native `/goal`.
+- Observe native interruption, failure, and deletion events. Interrupt only the owned evaluator and reject late reports.
+- Mark pending verifications from a previous plugin instance as `interrupted`. Do not replay lost admission receipts.
+- Leave v0.1 controller databases and artifacts untouched. Ignore obsolete `stateDirectory`, `limits`, and `protectedPaths` options during execution.
+- Provide read-only legacy SQLite inspection (`src/admin.mjs inspect`). Reject legacy `grant` and campaign execution.
+- Require stable OpenCode `>=2.2.1 <3.0.0` and pin SDK dependencies to a tested release.

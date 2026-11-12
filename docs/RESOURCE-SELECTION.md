@@ -1,307 +1,74 @@
 # Managed Browser Reference
 
 Workflow selection and shared safeguards live in `../rules/resource-selection.md`.
-Read the relevant tool procedures before using `prometheus-browser`, including
-in user/project-selected workflows. Apply the managed mode and login procedures
-only when that policy selects the default managed workflow.
-The installer deploys this reference under `<config_dir>/prometheus-browser/docs/`
-without adding it to OpenCode's always-loaded instructions. The compact rule is
-installed under `<config_dir>/prometheus-browser/rules/`.
+Read the relevant tool procedures before using `prometheus-browser`, including in user/project-selected workflows. Apply the managed mode and login procedures only when that policy selects the default managed workflow.
 
-The managed Playwright runtime uses configured `headless` or `virtual-display`
-task mode and a separate headed human-login window. These mode and login
-procedures do not constrain user/project-selected workflows. Tool requirements
-still apply whenever those workflows use `prometheus-browser`.
+The managed Playwright runtime uses configured `headless` or `virtual-display` task mode and a separate headed human-login window.
 
-### Shared settings
+## 1. Shared Settings
 
-The MCP and login helper read `<config_dir>/prometheus-browser.json`:
+The MCP server and login helper read `<config_dir>/prometheus-browser.json` (which overrides `PROMETHEUS_BROWSER_*` environment variables):
 
-```json
-{
-  "channel": "default",
-  "executionMode": "headless",
-  "automationCompatibility": false
-}
-```
+| Key | Accepted Values | Notes |
+| --- | --- | --- |
+| `channel` | `"default"`, `"chromium"`, `"chrome"`, `"msedge"` | Required. `default` uses headless shell in headless mode; `chrome` uses installed Google Chrome. |
+| `executionMode` | `"headless"`, `"virtual-display"`, `"external-cdp"` (`"cdp"`) | Defaults to `headless`. Linux `virtual-display` requires `xvfb-run` and `xauth`. |
+| `automationCompatibility` | Boolean | Chromium-only. Omits `--enable-automation`, disables `AutomationControlled`, and strips `HeadlessChrome`. |
+| `humanize` | Boolean | Enables simulated typing jitter, curved mouse moves, and navigation delays. Default `false`. |
+| `profile` | Profile ID or `{ seed, engine?, os?, deviceClass?, orientation?, legacy? }` | Selects a catalog emulation preset. Mutually exclusive with `identityProfile` and `external-cdp`. |
+| `identityProfile` | Boolean, `"random"`, or profile ID | Legacy JavaScript-only platform/WebGL override. |
+| `launchOptions` | `{ chromiumSandbox?: boolean, slowMo?: 0..1000, timeout?: 1..120000 }` | Explicit browser startup options. |
+| `contextOptions` | `{ viewport, screen, deviceScaleFactor, locale, timezoneId, colorScheme, reducedMotion, userAgent }` | Viewport/screen `1..16384` px; scale `(0, 8]`. `screen` and `deviceScaleFactor` require a fixed `viewport`. |
+| `cdpOptions` | `{ port?: 0..65535, endpoint?: string, userDataDir?: string, timeout?: 1..120000 }` | Loopback remote debugging options for `external-cdp`. |
 
-`channel` accepts `default`, `chromium` (full Chromium), or `chrome` (installed
-Google Chrome). `executionMode` defaults to `headless`; `automationCompatibility`
-defaults to false. When enabled, compatibility mode omits `--enable-automation`,
-adds `--disable-blink-features=AutomationControlled` (so `navigator.webdriver`
-remains `false` while preserving native `PluginArray` and iframe prototype
-consistency), and strips `HeadlessChrome` from the default user agent. Optional `profile` selects a source-backed device/desktop emulation preset, with an explicit ID or seeded filters. Optional `identityProfile` retains the legacy JavaScript-only identity experiments; these are not verified coherent hardware identities. See the repository's `docs/BROWSER-PROFILES.md` for the catalog, engine requirements, reproducibility, and limitations.
+Do not change settings or switch modes to retry an access denial.
 
-The settings file takes precedence over inherited environment values. Without
-it, `PROMETHEUS_BROWSER_CHANNEL`, `PROMETHEUS_BROWSER_EXECUTION_MODE`,
-`PROMETHEUS_BROWSER_IDENTITY_PROFILE`, and
-`PROMETHEUS_BROWSER_AUTOMATION_COMPATIBILITY=true|false` supply these settings.
-Malformed settings fail before launch. Both task modes default to a 1280x1024
-viewport. Existing settings keep their behavior.
+## 2. Browser Profiles
 
-Optional `humanize: true` enables simulated input timing at session startup.
-The default is false. Without a settings file, `PROMETHEUS_BROWSER_HUMANIZE`
-supplies this setting. A settings file takes precedence, including when it omits
-`humanize`. Per-action settings and `browser_configure` can change the session behavior.
-
-Optional `launchOptions` and `contextOptions` configure supported browser assembly
-settings without changing the execution mode or package versions:
-
-```json
-{
-  "channel": "chrome",
-  "executionMode": "headless",
-  "launchOptions": { "slowMo": 0, "timeout": 15000 },
-  "contextOptions": {
-    "viewport": { "width": 1440, "height": 900 },
-    "screen": { "width": 1440, "height": 1000 },
-    "deviceScaleFactor": 1,
-    "locale": "en-GB",
-    "timezoneId": "Europe/London",
-    "colorScheme": "light",
-    "reducedMotion": "no-preference"
-  }
-}
-```
-
-Use these options for the application's display and timing requirements. Do not
-change them to retry an access denial. Unspecified options keep Playwright's
-defaults. The task browser and the human login browser use the same configured
-context options. The human login window remains headed.
-
-| Setting | Accepted values |
-| --- | --- |
-| `launchOptions.chromiumSandbox` | Boolean; omitted by default. |
-| `launchOptions.slowMo` | Fixed operation delay, 0–1000 milliseconds; omitted by default. |
-| `launchOptions.timeout` | Browser startup timeout, 1–120000 whole milliseconds. The installer probe still has a 30-second limit. |
-| `contextOptions.viewport` | Width and height, each 1–16384 whole pixels; or `null` to use the host window size. |
-| `contextOptions.screen` | Width and height, each 1–16384 whole pixels. |
-| `contextOptions.deviceScaleFactor` | Number greater than 0 and at most 8. |
-| `contextOptions.locale` | Valid language tag. |
-| `contextOptions.timezoneId` | Valid timezone name. |
-| `contextOptions.colorScheme` | `light`, `dark`, `no-preference`, or `null` for system defaults. |
-| `contextOptions.reducedMotion` | `reduce`, `no-preference`, or `null` for system defaults. |
-
-`screen` and `deviceScaleFactor` require a fixed viewport. Display options emulate
-page-visible geometry; they do not change the Linux Xvfb screen. Arbitrary launch
-arguments, user-agent overrides, proxy credentials, and raw storage state are not
-accepted in these option objects. Approved saved state still uses the private
-origin-scoped restoration path.
-
-`channel: "chrome"` uses installed Chrome. Current Chrome uses modern headless
-with Playwright's `--headless` argument. `channel: "chromium"` selects full bundled
-Chromium. An omitted/default channel selects the separate headless shell in
-headless mode. These are different executable selections, not just window flags.
-
-Install dependencies and the selected browser from the repository root first:
+`scripts/browser-profiles.mjs` provides 241 read-only presets from pinned Playwright 1.63.0 descriptors (207 upstream devices, 30 desktop OS/display variants, and 4 legacy Chrome 124 presets).
 
 ```sh
-npm ci
-npx playwright install chromium
+npm run browser:profiles -- list --engine chromium --os Linux --legacy false
+npm run browser:profiles -- show desktop-linux-chrome-fhd
+npm run browser:profiles -- sample campaign-001 --engine chromium --os Linux --device-class desktop
 ```
 
-Use installed Google Chrome instead when `channel` is `chrome`. Linux
-`virtual-display` mode also requires `xvfb` and `xauth`. Then install the managed
-profile outside the repository:
+- If `profile` and `identityProfile` are omitted, the runtime keeps the native host browser identity.
+- A `profile` sets user agent, viewport, screen, scale, mobile, and touch options together. Conflicting `contextOptions` fail validation.
+- Firefox and WebKit presets require `channel: "default"`. Edge presets select `msedge`.
+- GPU, architecture, platform, and network headers remain native under `profile`. Record the profile ID, `catalogSHA256`, and running `browserVersion` from `browser_status` or `collectBrowserProfileEvidence(page)`.
 
-```sh
-node scripts/browser-profile.mjs install --config-dir "$HOME/.config/opencode" --quiescent
-```
+## 3. Navigation, Readiness, and Input
 
-Stop browser tasks, login helpers, and affected OpenCode servers before installation.
-The `--quiescent` flag records your assertion. It does not detect active work.
-The installer preserves the shared settings file. Restart OpenCode after changes
-to runtime files, settings, or agent instructions. MCP configuration reports
-`configured`; `browser_status` reports the selected execution mode, applied launch
-options, browser version, virtual display, and page health. It also reports the
-Playwright and Node versions, platform, architecture, configured distribution,
-and context options. Status does not launch a browser. The browser version is
-`null` until a browser is running. Reported launch options are the wrapper's
-explicit options, not the full list of Playwright's internal Chromium arguments.
+- `browser_navigate`: defaults to `wait_until: "load"`. Accepts `commit`, `domcontentloaded`, `load`, or `networkidle`, plus optional `ready_selector` and `timeout` (seconds). A readiness timeout leaves the page open.
+- `browser_reload`: waits up to 2 seconds for active network requests to settle, then reloads.
+- `browser_type`: appends text. Accepts `delay_ms` (`0..1000`, default `0`) or `humanize: true`. Inspect the field before retrying after a timeout.
+- `browser_configure`: toggles session `humanize` without restarting the server.
 
-For an existing `cuddly-winner-browser` registration, add `--migrate`. See the
-[operations and recovery guide](BROWSER-OPERATIONS.md) in the source checkout for
-cutover, update, rollback, and verification procedures. Installation launches a
-blank task browser to check readiness. It never opens a login window or loads
-saved authentication during that check.
+## 4. Login Handoff and State (`opencode-browser-login.mjs`)
 
-The installer registers `/browser <request>` as a human-invoked Build prompt
-command. Use it in a separate native conversation. The controller does not
-install this command, and enrolled Prometheus sessions do not receive browser
-tools. Project configuration can override global commands and MCP registrations.
-
-### Virtual-display execution
-
-On Debian-based Linux, install `xvfb` and `xauth`. The managed MCP launches itself
-through `xvfb-run --auto-servernum` on an isolated 1280x1024x24 screen with TCP
-disabled, then starts headed Chrome/Chromium. Each service owns its display.
-EOF and termination close the browser and display. Missing dependencies fail
-without using the physical desktop or switching modes.
-
-Xvfb and compatibility settings do not guarantee site access. Never switch modes
-or retry a denied request automatically. Human login still opens on the person's
-physical desktop, not inside the task display.
-
-## Page Readiness And Input Timing
-
-`browser_navigate` keeps `wait_until: "load"` as its default. Agents can choose
-`commit`, `domcontentloaded`, `load`, or `networkidle`. A page with continuous
-network activity may never reach `networkidle`.
-
-Use `ready_selector` when the application has a visible readiness signal. The
-optional `timeout` is in seconds. The navigation and selector wait share that
-budget, capped by the existing transport-safe wait limit. No fixed post-navigation
-sleep is added. A readiness timeout leaves the page open for inspection.
-
-```json
-{
-  "url": "https://example.com/",
-  "wait_until": "domcontentloaded",
-  "ready_selector": "#application-ready",
-  "timeout": 10
-}
-```
-
-`browser_type` accepts optional `delay_ms` from 0 to 1000 milliseconds. The delay
-is fixed, not random. Its default remains 0. Use it when the application requires
-spaced keyboard events. The existing action timeout still applies. After an
-interrupted typing action, inspect the field before adding more text.
-
-`browser_fill` is unchanged. No automatic mouse-path simulation is installed
-beyond the opt-in `navigator.webdriver`, `navigator.languages`, `navigator.plugins`,
-and configured `identityProfile` overrides.
-
-## Browser Actions And Login
-
-1. Try the requested action in the task browser, reusing approved state for the
-   target origin first. A sign-in link alone does not prove login is required.
-2. If login is required, name the site and obtain approval for headed Playwright.
-3. Start the visible window, ask the user to log in, leave it open, and reply.
-   End the turn. Do not poll, guess a completion selector, or impose a countdown.
-4. After the reply, complete capture and close the login window.
-5. Load the saved state in a fresh task context, verify account or requested task
-   access, and continue there. Do not complete the task in the login window.
-
-Use the same configuration root and state name for the handoff. Substitute the
-selected config directory for `$HOME/.config/opencode` if it differs:
+1. Try the task in the task browser first, reusing approved state for the target origin.
+2. If login is required, name the site and obtain user approval for a headed login window.
+3. Start the login worker, ask the user to log in, and end the turn. Do not poll or set a human deadline:
 
 ```sh
 node "$HOME/.config/opencode/prometheus-browser/opencode-browser-login.mjs" start --config-dir "$HOME/.config/opencode" --name site --url https://example.com/ --origin https://example.com
-# End the turn; capture only after the user's reply:
+```
+
+4. Only after the user's reply, capture state and close the login window:
+
+```sh
 node "$HOME/.config/opencode/prometheus-browser/opencode-browser-login.mjs" complete --config-dir "$HOME/.config/opencode" --name site
 ```
 
-`start` returns `awaiting-user`; its detached worker survives between turns.
-`cancel` closes without saving. `pending` is a metadata-only recovery check, not
-a polling loop. A second `start` refuses to replace a live worker. Startup and
-state reads have bounded operation timeouts; the person has no login deadline.
-A closed window cannot be captured or overwrite an existing record.
+5. Verify task access in a fresh task browser context. Do not complete the task in the login window.
 
-Report a blocker if the required login has no graphical session, the browser
-cannot start, or saved state cannot be reused. Neither capture nor a redirect
-proves authentication. A challenge or access denial does not justify new login.
+- **CDP Login:** Ordinary `default`, `chromium`, and `chrome` logins on macOS and Linux use CDP when no profile, custom launch/context options, or virtual display is configured. With `cdpOptions.endpoint`, the helper opens and closes only its own tab in a dedicated automation browser.
+- **Saved State:** Stored as mode-0600 JSON files under `<config_dir>/prometheus-sessions/<name>.json`, scoped to approved HTTPS origins. Capture reads cookies and `localStorage` (plus `--session-storage` when requested) from existing approved-origin tabs without calling `context.storageState()`.
+- **Privacy:** State values never enter model context, logs, screenshots, or tool output. `browser_evaluate` is disabled while saved state is loaded.
 
-### CDP login handoff
+## 5. File Transfers and Failure Handling
 
-The login helper uses CDP for ordinary `default`, `chromium`, and `chrome` login on macOS and Linux.
-This default applies when no enabled profile, context options, launch options, or virtual-display mode is selected.
-It does not change the selected channel or task-browser settings.
-Shared settings can also explicitly select `executionMode: "external-cdp"` or its `"cdp"` alias.
-The helper then uses the shared CDP path rather than Playwright's persistent-context launcher.
-Without an endpoint, it starts a
-dedicated Chrome process in headed mode with remote debugging bound to loopback.
-With `cdpOptions.endpoint`, it attaches to that browser's existing context; the
-operator must provide a headed, dedicated automation browser, not an everyday
-personal profile. Attachment does not make an existing headless browser headed.
-
-The handoff opens a new login tab without navigating existing tabs. Completion or
-cancellation closes that tab and disconnects; an externally owned browser and its
-context remain open. A process launched by the helper is terminated on cleanup.
-Approved-origin state is still captured only after the person's explicit reply.
-CDP login does not select a random identity profile. Existing-context display
-settings are not recreated, and configured compatibility behavior remains shared
-with the CDP runtime. Attachment failures do not fall back to another launcher.
-
-Selection occurs before site access, not as an automatic response to a challenge.
-Do not switch workflows or retry an access denial to bypass it. CDP support does
-not guarantee that a site will permit login.
-
-## Login State
-
-Saved state belongs outside repositories, with mode-0600 files under
-`<config_dir>/prometheus-sessions/`. Each record is scoped to approved HTTPS
-origins and a site/account name. Never use a personal everyday browser profile.
-Use ephemeral contexts by default; persistent login state is opt-in saved state,
-not a continuously running browser profile. Removal affects only the named record.
-
-Capture reads cookies and local storage from existing approved-origin tabs,
-including popups. It never calls `context.storageState()` in the visible login
-context or opens synthetic tabs. IndexedDB and closed-tab storage are not
-captured. Use `--session-storage` only when the site requires it. Restoration
-runs before page scripts and only on the stored origins. Missing or foreign-origin
-records are skipped; records without verification metadata cannot authenticate.
-
-New captures store `verification: {"method":"user-confirmed"}`. This authorizes
-restoration and inspection, not an authenticated verdict. The agent checks the
-actual account UI or task access. Selector-based records require their account
-selector before the runtime labels them authenticated. A composer alone is not
-proof of login. State values never enter model context, logs, screenshots, or
-tool output. The installed helpers manage private worker and socket records.
-
-## Image Uploads
-
-Use `browser_upload_image` with the user-requested absolute `path` and an observed
-visible `ref` or `selector`. The target can be a visible file input or a control
-that opens a file chooser. Open an attachment menu first if needed; the upload
-tool clicks its chooser control. Never target a hidden fallback input directly.
-
-The tool accepts nonempty regular PNG, JPEG, WebP, or GIF files, checks their byte
-signatures, and rejects symlink leaves and paths inside the private config root.
-The default size limit is 20 MiB (`PROMETHEUS_BROWSER_MAX_UPLOAD_BYTES`). It
-returns basename, MIME type, byte count, and SHA-256 after verifying selection.
-
-Record intent before attaching: selection may start a server upload. Inspect
-the attachment preview, filename, and site errors before submitting the prompt.
-Selection alone is not server acceptance. If the input resets or the operation
-times out, inspect the page before retrying. Upload never submits a prompt.
-
-## Downloads And Generated Files
-
-A page result and a local delivery are separate outcomes:
-
-1. Confirm the output belongs to the current request, not an older page item.
-2. Use `browser_download` with a visible control's `ref` or `selector`, or its
-   `url` option for retrieval through the same authenticated task context.
-3. Save without replacing an unrelated file.
-4. Validate nonzero size, file type, and required signature, hash, or content.
-5. Report success only after page association and local-byte checks pass.
-
-Supply `expected_content_type`, `signature_hex`, and `expected_sha256` when known.
-The download action preserves original bytes. When no download control exists,
-`browser_save_media` saves visible image/canvas pixels as PNG without exposing
-the source URL. It can reject a prior source fingerprint as stale. Neither action
-overwrites an existing destination; a page preview is not a delivered file.
-
-For generation, confirm the final prompt before submission, preserve the
-conversation address, and associate the new output with that submission.
-An existing image is not success.
-
-## Failure Handling And Interrupted Actions
-
-Use short bounded waits that leave the browser usable. Explicit navigation may
-recreate a closed page. Treat HTTP 401/403 and Cloudflare challenges as access
-denial: report the blocker rather than automatically navigating, recapturing
-login, restarting, or changing browser settings to bypass it.
-Navigation and `browser_reload` report denial before checking saved-account
-evidence or an optional readiness selector. `browser_reload` also allows active
-in-flight network requests to settle before reloading and accepts `wait_until`
-and `timeout`. Recognized challenge pages can be reported even with HTTP
-200. An ordinary page that mentions Cloudflare is not sufficient challenge
-evidence. These reports do not add a new workflow-switch or tool-use gate.
-
-Record intent before sending, publishing, purchasing, or starting generation.
-After an interruption, mark the outcome unknown and inspect the original page
-before considering a retry. Never repeat an unknown action automatically.
-Record only the stage, safe page address, mode, and possible action outcome,
-not credentials or page secrets. Stop if output association or local validation
-cannot establish success.
+- **Uploads (`browser_upload_image`):** Pass an absolute `path` and a visible file input or chooser button `ref`/`selector`. Accepts nonempty regular PNG, JPEG, WebP, or GIF files ($\le 20\text{ MiB}$) outside `<config_dir>`. Verify page attachment state before submitting.
+- **Downloads (`browser_download`, `browser_save_media`):** Confirm the output belongs to the current request. Save to a new path and verify nonzero bytes, MIME type, `signature_hex`, or `expected_sha256`. A page preview is not a delivered file, and an existing image is not success.
+- **Interruptions and Denial:** Treat HTTP 401/403 and Cloudflare challenges as access denial and report a blocker. Record intent before non-idempotent actions. If an action is interrupted, mark the outcome unknown, inspect the page, and never repeat an unknown action automatically.

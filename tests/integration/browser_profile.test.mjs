@@ -412,7 +412,9 @@ test('installed runtime starts with isolated dependencies and reuses migrated st
     assert.equal(status.hydratedAuthentication, true);
     assert.equal(status.mode, 'headless');
     assert.equal(status.playwrightVersion, '1.63.0');
-    assert.deepEqual(status.contextOptions, { viewport: { width: 1440, height: 900 }, locale: 'en-GB' });
+    assert.deepEqual(status.contextOptions.viewport, { width: 1440, height: 900 });
+    assert.equal(status.contextOptions.locale, 'en-GB');
+    assert.match(status.contextOptions.userAgent, /^Mozilla\/5\.0/);
     assert.equal(status.launchOptions.slowMo, 0);
     const upload = path.join(f.directory, 'input.png');
     fs.writeFileSync(upload, Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489', 'hex'));

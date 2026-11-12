@@ -1,39 +1,23 @@
-# Documentation index
+# Documentation Index
 
-Each subject has one detailed reference. Other documents link to that reference.
+Each topic has one reference document.
 
-## Product and runtime
-
-| Document | Purpose |
-| --- | --- |
-| [Project overview](../README.md) | Commands and user workflow. |
-| [Specification](../SPEC.md) | Product requirements and acceptance criteria. |
-| [Package guide](../packages/prometheus/README.md) | Installation, compatibility policy, and package limits. |
-| [Runtime reference](PROMETHEUS.md) | Native command execution, records, candidate checks, and interruption. |
-
-## Scenarios and Verification
-
-Scenarios define what to test. Verification defines how to collect and assess the evidence.
+## Product and Runtime
 
 | Document | Purpose |
 | --- | --- |
-| [Scenarios](SCENARIOS.md) | Required behavior and fault scenarios, requirement-to-check map, and evaluation criteria. |
-| [Verification](VERIFICATION.md) | Test execution, evidence classes, comparison rules, and release gates. |
-| [Native qualification](../packages/prometheus/qualification/README.md) | Scripted checks, retired campaigns, and live-model requirements. |
+| [Project overview](../README.md) | Commands, workflow, and quick checks. |
+| [Specification](../SPEC.md) | Product requirements and acceptance boundaries. |
+| [Package guide](../packages/prometheus/README.md) | Installation, OpenCode compatibility, tool inputs, and v0.1 migration. |
+| [Runtime reference](PROMETHEUS.md) | Execution flow, storage keys, candidate manifest, and interruption rules. |
+| [Verification guide](VERIFICATION.md) | Automated suites, required scenarios, live-model checks, and acceptance limits. |
 
-Accepted service versions come from the package policy.
-Keep exact tested versions and results with private verification reports.
+## Browser Integration
 
-## Browser integration
-
-The browser runtime is separate from goal execution.
-The installer places it under `<config_dir>/prometheus-browser/`.
+The browser runtime is separate from goal execution and installs under `<config_dir>/prometheus-browser/`.
 
 | Document | Purpose |
 | --- | --- |
-| [Resource selection rule](../rules/resource-selection.md) | Compact rule loaded in OpenCode instructions. |
-| [Browser reference](RESOURCE-SELECTION.md) | Shared settings, browser actions, login, transfers, and failure handling. |
-| [Operations guide](BROWSER-OPERATIONS.md) | Installation, updates, rollback, recovery, and verification procedures. |
-| [Profile reference](BROWSER-PROFILES.md) | Catalog sources, explicit selection, reproducibility, and identity limits. |
-
-Local `TEMP-` notes are ignored by Git. They are not published references or active work plans.
+| [Resource selection rule](../rules/resource-selection.md) | Compact workflow and safeguard rule loaded in OpenCode instructions. |
+| [Browser reference](RESOURCE-SELECTION.md) | Shared settings, profiles, login handoff, file transfers, and failure handling. |
+| [Operations guide](BROWSER-OPERATIONS.md) | Installation, migration, updates, rollback, and verification procedures. |

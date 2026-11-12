@@ -1,31 +1,6 @@
 #!/usr/bin/env node
-// opencode-playwright-mcp.mjs
-//
-// Managed Playwright MCP stdio server. This is the project's single browser
-// backend. It exposes the browser_* tool surface over newline-delimited
-// JSON-RPC on stdin/stdout and drives one task browser via Playwright.
-//
-// Design (see docs/RESOURCE-SELECTION.md "Browser policy"):
-//   - Task mode is headless or virtual-display. Human login is handled by
-//     opencode-browser-login.mjs, which writes approved state that this server
-//     loads privately. The visible login window never performs task work.
-//   - Saved login state is loaded only for a matching approved origin, straight
-//     into the browser context. State values (cookies, storage) never appear in
-//     tool output, logs, or anything returned toward model context. The server
-//     therefore does not expose cookie/storage export tools at all.
-//   - Every wait and browser process has a bounded timeout and a cleanup path.
-//
-// Environment:
-//   PROMETHEUS_CONFIG_DIR         config root holding prometheus-sessions/
-//   PROMETHEUS_BROWSER_CHANNEL    default, chromium, or chrome
-//   PROMETHEUS_BROWSER_EXECUTION_MODE headless or virtual-display
-//   PROMETHEUS_BROWSER_STATES     optional comma list of state record names
-//                                    to consider for hydration (default: all)
-//   PROMETHEUS_BROWSER_TIMEOUT_MS default per-action timeout (default 30000)
-//   PROMETHEUS_BROWSER_MAX_WAIT_MS maximum selector/text wait (default 25000)
-//   PROMETHEUS_BROWSER_TRANSPORT_TIMEOUT_MS MCP request budget (default 30000)
-//   PROMETHEUS_BROWSER_MAX_MEDIA_PIXELS maximum image/canvas pixels (default 16M)
-//   PROMETHEUS_BROWSER_MAX_UPLOAD_BYTES maximum image upload bytes (default 20 MiB)
+// Managed Playwright MCP stdio server exposing browser_* tools over JSON-RPC.
+// Restores approved origin login state privately; never exposes state values.
 
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
@@ -37,7 +12,6 @@ import { browserConfigFromEnv, browserLaunchOptions, browserRuntimeInfo, createT
 import { enterTaskDisplay } from "./opencode-browser-service.mjs";
 import { humanClick, humanType, applyNavigationDelay } from "./opencode-browser-humanize.mjs";
 
-// Re-exec the actual MCP service, not its caller, inside an isolated display.
 const TASK_CONFIG = browserConfigFromEnv();
 await enterTaskDisplay(TASK_CONFIG);
 
@@ -53,85 +27,66 @@ const MAX_DOWNLOAD_BYTES = Number(process.env.PROMETHEUS_BROWSER_MAX_DOWNLOAD_BY
 const configuredMaxUpload = Number(process.env.PROMETHEUS_BROWSER_MAX_UPLOAD_BYTES || 20 * 1024 * 1024);
 const MAX_UPLOAD_BYTES = Number.isSafeInteger(configuredMaxUpload) && configuredMaxUpload > 0 ? configuredMaxUpload : 20 * 1024 * 1024;
 const configuredMaxMediaPixels = Number(process.env.PROMETHEUS_BROWSER_MAX_MEDIA_PIXELS || 16 * 1024 * 1024);
-const MAX_MEDIA_PIXELS = Number.isFinite(configuredMaxMediaPixels) && configuredMaxMediaPixels > 0
-  ? Math.floor(configuredMaxMediaPixels)
-  : 16 * 1024 * 1024;
-const STATE_NAMES = (process.env.PROMETHEUS_BROWSER_STATES || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+const MAX_MEDIA_PIXELS = Number.isFinite(configuredMaxMediaPixels) && configuredMaxMediaPixels > 0 ? Math.floor(configuredMaxMediaPixels) : 16 * 1024 * 1024;
+const STATE_NAMES = (process.env.PROMETHEUS_BROWSER_STATES || "").split(",").map((s) => s.trim()).filter(Boolean);
 
 const SERVER_INFO = { name: "prometheus-browser", version: "1.1.0" };
 const PROTOCOL_VERSION = "2024-11-05";
+const SESSION_CONFIG = { humanize: Boolean(TASK_CONFIG.humanize) };
+const resolveHumanize = (toolArg) => typeof toolArg === "boolean" ? toolArg : Boolean(SESSION_CONFIG.humanize);
 
-const SESSION_CONFIG = {
-  humanize: Boolean(TASK_CONFIG.humanize),
-};
-
-function resolveHumanize(toolArg) {
-  if (typeof toolArg === "boolean") return toolArg;
-  return Boolean(SESSION_CONFIG.humanize);
-}
-
-// --- Tool surface ----------------------------------------------------------
-// Each tool has a Playwright-backed handler. Cookie/storage export tools are
-// deliberately absent: login state enters only through the private hydration
-// path, never through a model-visible tool.
+const WAIT_UNTIL_ENUM = ["commit", "domcontentloaded", "load", "networkidle"];
+const toolDef = (name, description, properties = {}, required) => ({
+  name, description, inputSchema: { type: "object", properties, ...(required ? { required } : {}) },
+});
 
 const TOOLS = [
-  { name: "browser_navigate", description: "Navigate to a URL. Optionally select a load event and wait for a visible readiness selector without fixed sleeps.", inputSchema: { type: "object", properties: { url: { type: "string" }, wait_until: { type: "string", enum: ["commit", "domcontentloaded", "load", "networkidle"] }, ready_selector: { type: "string" }, timeout: { type: "number", description: "Total navigation/readiness budget in seconds, bounded by the transport budget." }, humanize: { type: "boolean", description: "Simulate human behavior (2-4s settle delay post-navigation)." } }, required: ["url"] } },
-  { name: "browser_status", description: "Return non-secret browser runtime and page health metadata.", inputSchema: { type: "object", properties: {} } },
-  { name: "browser_navigate_back", description: "Go back in history.", inputSchema: { type: "object", properties: {} } },
-  { name: "browser_forward", description: "Go forward in history.", inputSchema: { type: "object", properties: {} } },
-  { name: "browser_reload", description: "Reload the current page after allowing in-flight network requests to settle.", inputSchema: { type: "object", properties: { wait_until: { type: "string", enum: ["commit", "domcontentloaded", "load", "networkidle"] }, timeout: { type: "number", description: "Total reload budget in seconds, bounded by the transport budget." } } } },
-  { name: "browser_snapshot", description: "Readable text of the current page (title, URL, body text).", inputSchema: { type: "object", properties: { max_chars: { type: "number" } } } },
-  { name: "browser_markdown", description: "Current page rendered as terse Markdown-ish text.", inputSchema: { type: "object", properties: { max_chars: { type: "number" } } } },
-  { name: "browser_interactive_elements", description: "List clickable/typeable elements with stable refs.", inputSchema: { type: "object", properties: { limit: { type: "number" } } } },
-  { name: "browser_links", description: "List anchor links as {text, href}.", inputSchema: { type: "object", properties: { limit: { type: "number" } } } },
-  { name: "browser_click", description: "Click an element by ref or selector.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, humanize: { type: "boolean", description: "Simulate curved mouse movement before clicking." } } } },
-  { name: "browser_fill", description: "Set the value of an input by ref or selector.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, value: { type: "string" } }, required: ["value"] } },
-  { name: "browser_type", description: "Type text into an input (appends). Optional fixed delay_ms supports interfaces that need spaced keyboard events; default 0.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, text: { type: "string" }, delay_ms: { type: "number", minimum: 0, maximum: 1000 }, humanize: { type: "boolean", description: "Simulate human typing jitter (50-150ms per character)." } }, required: ["text"] } },
-  { name: "browser_fill_form", description: "Fill multiple fields, optionally submit.", inputSchema: { type: "object", properties: { fields: { type: "array" }, submit_ref: { type: "string" }, submit_selector: { type: "string" } }, required: ["fields"] } },
-  { name: "browser_select_option", description: "Select an option in a <select>.", inputSchema: { type: "object", properties: { selector: { type: "string" }, value: { type: "string" } }, required: ["selector", "value"] } },
-  { name: "browser_press_key", description: "Dispatch a keyboard key.", inputSchema: { type: "object", properties: { key: { type: "string" }, selector: { type: "string" } }, required: ["key"] } },
-  { name: "browser_get_attribute", description: "Read an attribute of an element.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, attribute: { type: "string" } }, required: ["attribute"] } },
-  { name: "browser_count", description: "Count elements matching a selector.", inputSchema: { type: "object", properties: { selector: { type: "string" } }, required: ["selector"] } },
-  { name: "browser_search", description: "Find substring matches in visible page text.", inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] } },
-  { name: "browser_extract", description: "Extract a structured object from the page given {field: selector}.", inputSchema: { type: "object", properties: { schema: { type: "object" } }, required: ["schema"] } },
-  { name: "browser_evaluate", description: "Evaluate a JavaScript expression in the page.", inputSchema: { type: "object", properties: { expression: { type: "string" } }, required: ["expression"] } },
-  { name: "browser_console_messages", description: "Return console messages logged by the page.", inputSchema: { type: "object", properties: {} } },
-  { name: "browser_scroll", description: "Scroll the page or an element.", inputSchema: { type: "object", properties: { direction: { type: "string" }, amount: { type: "number" }, selector: { type: "string" } } } },
-  { name: "browser_wait_for", description: "Wait for a selector to appear.", inputSchema: { type: "object", properties: { selector: { type: "string" }, timeout: { type: "number" } }, required: ["selector"] } },
-  { name: "browser_wait_for_text", description: "Wait for text to appear in the page.", inputSchema: { type: "object", properties: { text: { type: "string" }, timeout: { type: "number" } }, required: ["text"] } },
-  { name: "browser_screenshot", description: "Capture the viewport as a PNG saved to path.", inputSchema: { type: "object", properties: { path: { type: "string" }, full_page: { type: "boolean" } }, required: ["path"] } },
-  { name: "browser_upload_image", description: "Attach a user-requested local PNG, JPEG, WebP, or GIF through a visible file input or upload button. Returns verified attachment metadata, not server acceptance. Inspect the page before submitting or retrying.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, path: { type: "string" } }, required: ["path"] } },
-  { name: "browser_download", description: "Capture a download through a visible ref or selector, or retrieve a URL through the authenticated task page; save only after validation.", inputSchema: { type: "object", properties: { url: { type: "string" }, ref: { type: "string" }, selector: { type: "string" }, path: { type: "string" }, min_bytes: { type: "number" }, expected_sha256: { type: "string" }, expected_content_type: { type: "string" }, signature_hex: { type: "string" } }, required: ["path"] } },
-  { name: "browser_save_media", description: "Save a visible image or canvas through the authenticated browser context without exposing its source URL.", inputSchema: { type: "object", properties: { ref: { type: "string" }, selector: { type: "string" }, path: { type: "string" }, reject_source_sha256: { type: "string" }, min_bytes: { type: "number" }, expected_sha256: { type: "string" }, expected_content_type: { type: "string" }, signature_hex: { type: "string" } }, required: ["path"] } },
-  { name: "browser_tab_new", description: "Open a new tab, optionally navigating to a URL.", inputSchema: { type: "object", properties: { url: { type: "string" } } } },
-  { name: "browser_tab_list", description: "List open tabs.", inputSchema: { type: "object", properties: {} } },
-  { name: "browser_tab_switch", description: "Switch the active tab by index.", inputSchema: { type: "object", properties: { index: { type: "number" } }, required: ["index"] } },
-  { name: "browser_tab_close", description: "Close a tab by index (default active).", inputSchema: { type: "object", properties: { index: { type: "number" } } } },
-  { name: "browser_configure", description: "Adjust runtime settings for the browser session without restarting the server.", inputSchema: { type: "object", properties: { humanize: { type: "boolean", description: "Enable or disable simulated human behavior (typing delays, curved mouse movement, navigation delays) for all subsequent actions in this session." } } } },
-  { name: "browser_close", description: "Close the browser and reset state.", inputSchema: { type: "object", properties: {} } },
+  toolDef("browser_navigate", "Navigate to a URL. Optionally select a load event and wait for a visible readiness selector without fixed sleeps.", { url: { type: "string" }, wait_until: { type: "string", enum: WAIT_UNTIL_ENUM }, ready_selector: { type: "string" }, timeout: { type: "number", description: "Total navigation/readiness budget in seconds, bounded by the transport budget." }, humanize: { type: "boolean", description: "Simulate human behavior (2-4s settle delay post-navigation)." } }, ["url"]),
+  toolDef("browser_status", "Return non-secret browser runtime and page health metadata."),
+  toolDef("browser_navigate_back", "Go back in history."),
+  toolDef("browser_forward", "Go forward in history."),
+  toolDef("browser_reload", "Reload the current page after allowing in-flight network requests to settle.", { wait_until: { type: "string", enum: WAIT_UNTIL_ENUM }, timeout: { type: "number", description: "Total reload budget in seconds, bounded by the transport budget." } }),
+  toolDef("browser_snapshot", "Readable text of the current page (title, URL, body text).", { max_chars: { type: "number" } }),
+  toolDef("browser_markdown", "Current page rendered as terse Markdown-ish text.", { max_chars: { type: "number" } }),
+  toolDef("browser_interactive_elements", "List clickable/typeable elements with stable refs.", { limit: { type: "number" } }),
+  toolDef("browser_links", "List anchor links as {text, href}.", { limit: { type: "number" } }),
+  toolDef("browser_click", "Click an element by ref or selector.", { ref: { type: "string" }, selector: { type: "string" }, humanize: { type: "boolean", description: "Simulate curved mouse movement before clicking." } }),
+  toolDef("browser_fill", "Set the value of an input by ref or selector.", { ref: { type: "string" }, selector: { type: "string" }, value: { type: "string" } }, ["value"]),
+  toolDef("browser_type", "Type text into an input (appends). Optional fixed delay_ms supports interfaces that need spaced keyboard events; default 0.", { ref: { type: "string" }, selector: { type: "string" }, text: { type: "string" }, delay_ms: { type: "number", minimum: 0, maximum: 1000 }, humanize: { type: "boolean", description: "Simulate human typing jitter (50-150ms per character)." } }, ["text"]),
+  toolDef("browser_fill_form", "Fill multiple fields, optionally submit.", { fields: { type: "array" }, submit_ref: { type: "string" }, submit_selector: { type: "string" } }, ["fields"]),
+  toolDef("browser_select_option", "Select an option in a <select>.", { selector: { type: "string" }, value: { type: "string" } }, ["selector", "value"]),
+  toolDef("browser_press_key", "Dispatch a keyboard key.", { key: { type: "string" }, selector: { type: "string" } }, ["key"]),
+  toolDef("browser_get_attribute", "Read an attribute of an element.", { ref: { type: "string" }, selector: { type: "string" }, attribute: { type: "string" } }, ["attribute"]),
+  toolDef("browser_count", "Count elements matching a selector.", { selector: { type: "string" } }, ["selector"]),
+  toolDef("browser_search", "Find substring matches in visible page text.", { query: { type: "string" }, limit: { type: "number" } }, ["query"]),
+  toolDef("browser_extract", "Extract a structured object from the page given {field: selector}.", { schema: { type: "object" } }, ["schema"]),
+  toolDef("browser_evaluate", "Evaluate a JavaScript expression in the page.", { expression: { type: "string" } }, ["expression"]),
+  toolDef("browser_console_messages", "Return console messages logged by the page."),
+  toolDef("browser_scroll", "Scroll the page or an element.", { direction: { type: "string" }, amount: { type: "number" }, selector: { type: "string" } }),
+  toolDef("browser_wait_for", "Wait for a selector to appear.", { selector: { type: "string" }, timeout: { type: "number" } }, ["selector"]),
+  toolDef("browser_wait_for_text", "Wait for text to appear in the page.", { text: { type: "string" }, timeout: { type: "number" } }, ["text"]),
+  toolDef("browser_screenshot", "Capture the viewport as a PNG saved to path.", { path: { type: "string" }, full_page: { type: "boolean" } }, ["path"]),
+  toolDef("browser_upload_image", "Attach a user-requested local PNG, JPEG, WebP, or GIF through a visible file input or upload button. Returns verified attachment metadata, not server acceptance. Inspect the page before submitting or retrying.", { ref: { type: "string" }, selector: { type: "string" }, path: { type: "string" } }, ["path"]),
+  toolDef("browser_download", "Capture a download through a visible ref or selector, or retrieve a URL through the authenticated task page; save only after validation.", { url: { type: "string" }, ref: { type: "string" }, selector: { type: "string" }, path: { type: "string" }, min_bytes: { type: "number" }, expected_sha256: { type: "string" }, expected_content_type: { type: "string" }, signature_hex: { type: "string" } }, ["path"]),
+  toolDef("browser_save_media", "Save a visible image or canvas through the authenticated browser context without exposing its source URL.", { ref: { type: "string" }, selector: { type: "string" }, path: { type: "string" }, reject_source_sha256: { type: "string" }, min_bytes: { type: "number" }, expected_sha256: { type: "string" }, expected_content_type: { type: "string" }, signature_hex: { type: "string" } }, ["path"]),
+  toolDef("browser_tab_new", "Open a new tab, optionally navigating to a URL.", { url: { type: "string" } }),
+  toolDef("browser_tab_list", "List open tabs."),
+  toolDef("browser_tab_switch", "Switch the active tab by index.", { index: { type: "number" } }, ["index"]),
+  toolDef("browser_tab_close", "Close a tab by index (default active).", { index: { type: "number" } }),
+  toolDef("browser_configure", "Adjust runtime settings for the browser session without restarting the server.", { humanize: { type: "boolean", description: "Enable or disable simulated human behavior (typing delays, curved mouse movement, navigation delays) for all subsequent actions in this session." } }),
+  toolDef("browser_close", "Close the browser and reset state."),
 ];
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
-
-// --- Browser lifecycle -----------------------------------------------------
 
 let chromium = null;
 let browser = null;
 let context = null;
 let resolvedRuntime = null;
-let pages = []; // ordered list of Page
+let pages = [];
 let activeIndex = 0;
 const consoleMessages = [];
 const hydratedOrigins = new Map();
 const verifiedOrigins = new Set();
-
-async function ensureChromium() {
-  if (!chromium) ({ chromium } = await import("playwright"));
-  return chromium;
-}
 
 function registerPage(page) {
   if (pages.includes(page)) return;
@@ -143,17 +98,14 @@ function registerPage(page) {
 
 async function ensureContext() {
   if (context) return context;
-  await ensureChromium();
+  if (!chromium) ({ chromium } = await import("playwright"));
   ({ browser, context, runtime: resolvedRuntime } = await createTaskContext(chromium, TASK_CONFIG));
   context.setDefaultTimeout(DEFAULT_TIMEOUT);
   pages = [];
   context.on("page", registerPage);
   const existing = typeof context.pages === "function" ? context.pages() : [];
-  if (existing.length) {
-    for (const p of existing) registerPage(p);
-  } else {
-    registerPage(await context.newPage());
-  }
+  if (existing.length) for (const p of existing) registerPage(p);
+  else registerPage(await context.newPage());
   activeIndex = 0;
   return context;
 }
@@ -181,57 +133,32 @@ async function closeBrowser() {
   hydratedOrigins.clear();
   verifiedOrigins.clear();
   consoleMessages.length = 0;
-  if (toClose) {
-    try {
-      await toClose.close();
-    } catch {
-      /* already gone */
-    }
-  }
+  if (toClose) { try { await toClose.close(); } catch {} }
 }
 
-// Candidate state record names to consider for hydration.
 function candidateStateNames() {
   if (!CONFIG_DIR) return [];
   if (STATE_NAMES.length) return STATE_NAMES;
-  try {
-    return listStates(CONFIG_DIR).map((m) => m.name);
-  } catch {
-    return [];
-  }
+  try { return listStates(CONFIG_DIR).map((m) => m.name); } catch { return []; }
 }
 
-// Hydrate approved login state for a target origin, once per origin per process.
-// Cookies go straight onto the live context; origin localStorage and any
-// explicitly-captured session storage are restored via an init script so they
-// are present before the navigation's first script runs. Nothing here is ever
-// returned toward the model.
 async function maybeHydrate(url) {
   if (!CONFIG_DIR) return;
   let origin;
-  try {
-    origin = new URL(url).origin;
-  } catch {
-    return;
-  }
+  try { origin = new URL(url).origin; } catch { return; }
   if (hydratedOrigins.has(origin)) return { origin, ...hydratedOrigins.get(origin) };
   let stateWithoutVerification = false;
   for (const name of candidateStateNames()) {
     let loaded;
-    try {
-      loaded = loadStateForOrigin({ configDir: CONFIG_DIR, name, origin });
-    } catch {
-      continue;
-    }
+    try { loaded = loadStateForOrigin({ configDir: CONFIG_DIR, name, origin }); } catch { continue; }
     if (!loaded) continue;
-    const selector = loaded.verification?.selector;
-    if (!selector && loaded.verification?.method !== "user-confirmed") {
+    if (!loaded.verification?.selector && loaded.verification?.method !== "user-confirmed") {
       stateWithoutVerification = true;
       continue;
     }
     await hydrateBrowserState(context, loaded);
     hydratedOrigins.set(origin, loaded.verification);
-    return { origin, ...loaded.verification }; // one matching record per origin
+    return { origin, ...loaded.verification };
   }
   if (stateWithoutVerification) {
     throw new Error("saved login state has no account verification selector; complete a new login capture");
@@ -240,30 +167,24 @@ async function maybeHydrate(url) {
 }
 
 async function verifyHydratedAccount(page, hydration) {
-  if (!hydration || verifiedOrigins.has(hydration.origin)) return;
-  // Capture on the person's reply is not account evidence. Allow inspection
-  // and task access in a fresh context; never label the restored state authenticated.
-  if (hydration.method === "user-confirmed") return;
+  if (!hydration || verifiedOrigins.has(hydration.origin) || hydration.method === "user-confirmed") return;
   let visible = false;
-  try {
-    visible = await page.locator(hydration.selector).first().isVisible();
-  } catch {
-    /* Invalid or obsolete selectors are handled as failed account evidence. */
-  }
+  try { visible = await page.locator(hydration.selector).first().isVisible(); } catch {}
   if (!visible) {
     throw new Error("saved login state has no visible account evidence in the task browser; complete a new login capture");
   }
   verifiedOrigins.add(hydration.origin);
 }
 
-// --- Element resolution ----------------------------------------------------
-
 const REF_TAG = "data-cw-ref";
 const INTERACTIVE_SELECTOR =
   "a[href], button, input, textarea, select, [contenteditable]:not([contenteditable=false]), [role=button], [role=link], [role=textbox], [onclick], [tabindex]";
+const isElementDisabled = (el) =>
+  el.matches(":disabled") ||
+  el.getAttribute("aria-disabled") === "true" ||
+  el.hasAttribute("data-visually-disabled") ||
+  Boolean(el.closest("[inert]"));
 
-// Assign stable refs (e1, e2, ...) to interactive elements and return a compact
-// list. Refs live in a page attribute so a later click/fill can target them.
 async function tagInteractive(page, limit) {
   return page.evaluate(
     ({ sel, attr, cap }) => {
@@ -276,21 +197,15 @@ async function tagInteractive(page, limit) {
         return rect.width > 0 && rect.height > 0;
       };
       const isDisabled = (el) =>
-        el.matches(":disabled") ||
-        el.getAttribute("aria-disabled") === "true" ||
-        el.hasAttribute("data-visually-disabled") ||
-        Boolean(el.closest("[inert]"));
+        el.matches(":disabled") || el.getAttribute("aria-disabled") === "true" ||
+        el.hasAttribute("data-visually-disabled") || Boolean(el.closest("[inert]"));
       const nodes = Array.from(document.querySelectorAll(sel)).filter(isVisible).slice(0, cap);
-      const out = [];
-      let n = 0;
-      for (const el of nodes) {
-        n += 1;
-        const ref = `e${n}`;
+      return nodes.map((el, i) => {
+        const ref = `e${i + 1}`;
         el.setAttribute(attr, ref);
         const label = (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").trim().slice(0, 80);
-        out.push({ ref, tag: el.tagName.toLowerCase(), type: el.getAttribute("type") || undefined, text: label, disabled: isDisabled(el) });
-      }
-      return out;
+        return { ref, tag: el.tagName.toLowerCase(), type: el.getAttribute("type") || undefined, text: label, disabled: isDisabled(el) };
+      });
     },
     { sel: INTERACTIVE_SELECTOR, attr: REF_TAG, cap: Number.isFinite(limit) ? limit : 200 },
   );
@@ -304,16 +219,9 @@ function locatorFor(page, args) {
 
 async function assertActionable(locator, action, timeout = DEFAULT_TIMEOUT) {
   await locator.waitFor({ state: "visible", timeout });
-  const disabled = await locator.evaluate((el) =>
-    el.matches(":disabled") ||
-    el.getAttribute("aria-disabled") === "true" ||
-    el.hasAttribute("data-visually-disabled") ||
-    Boolean(el.closest("[inert]")),
-  );
-  if (disabled) throw new Error(`${action} target is disabled`);
+  if (await locator.evaluate(isElementDisabled)) throw new Error(`${action} target is disabled`);
 }
 
-// Both event and click promises are observed, including when a click fails.
 async function clickForEvent(page, locator, event, timeout) {
   let timer, received, closed;
   const pending = new Promise((resolve, reject) => {
@@ -364,18 +272,13 @@ async function readUploadImage(file) {
 async function fillAndVerify(locator, value) {
   await assertActionable(locator, "fill");
   await locator.fill(value, { timeout: DEFAULT_TIMEOUT });
-  const observed = await locator.evaluate((el) => {
-    if ("value" in el) return String(el.value);
-    if (el.isContentEditable) return el.innerText;
-    return el.textContent || "";
-  });
+  const observed = await locator.evaluate((el) => "value" in el ? String(el.value) : el.isContentEditable ? el.innerText : el.textContent || "");
   if (observed !== value) throw new Error("fill verification failed: visible control value did not match");
 }
 
 function boundedWaitMs(seconds) {
   if (seconds !== undefined && (!Number.isFinite(seconds) || seconds <= 0)) throw new Error("timeout must be a positive number of seconds");
-  const requested = Number.isFinite(seconds) ? seconds * 1000 : DEFAULT_TIMEOUT;
-  return Math.min(requested, MAX_WAIT_MS);
+  return Math.min(Number.isFinite(seconds) ? seconds * 1000 : DEFAULT_TIMEOUT, MAX_WAIT_MS);
 }
 
 async function navigationClassification(page, status, timeout = DEFAULT_TIMEOUT) {
@@ -383,43 +286,28 @@ async function navigationClassification(page, status, timeout = DEFAULT_TIMEOUT)
   try {
     const title = await page.title();
     const challengeTitle = /^(?:just a moment[.!\s…]*|checking your browser.*|attention required.*cloudflare.*|verify (?:that )?you are human[.!\s]*)$/i.test(title.trim());
-    // Do not classify an ordinary page merely because it mentions Cloudflare.
     if (!denied && !challengeTitle) return status && status >= 400 ? ", HTTP error" : "";
     const body = await page.locator("body").innerText({ timeout: Math.max(1, Math.min(timeout, 1000)) });
     const challengeBody = /checking your browser|verify (?:that )?you are human|performing security verification|enable javascript and cookies to continue/i.test(body);
     if (denied ? /cloudflare|just a moment|checking your browser|verify you are human/i.test(`${title}\n${body}`) : challengeTitle && challengeBody) {
       return ", Cloudflare challenge detected; do not retry automatically";
     }
-  } catch {
-    /* Preserve the HTTP classification when the denial page cannot be read. */
-  }
+  } catch {}
   return denied ? ", access denied" : status && status >= 400 ? ", HTTP error" : "";
 }
 
-// --- Tool handlers ---------------------------------------------------------
-
-function text(value) {
-  return { content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }] };
-}
+const text = (value) => ({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }] });
 
 function withDownloadTimeout(promise) {
   let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error("browser download timed out")), DEFAULT_TIMEOUT);
-  });
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("browser download timed out")), DEFAULT_TIMEOUT); });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 async function readDownloadStream(download) {
-  let stream;
-  let timer;
-  let timedOut = false;
+  let stream, timer, timedOut = false;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      timedOut = true;
-      stream?.destroy();
-      reject(new Error("browser download timed out"));
-    }, DEFAULT_TIMEOUT);
+    timer = setTimeout(() => { timedOut = true; stream?.destroy(); reject(new Error("browser download timed out")); }, DEFAULT_TIMEOUT);
   });
   const read = (async () => {
     stream = await download.createReadStream();
@@ -428,29 +316,18 @@ async function readDownloadStream(download) {
     let total = 0;
     for await (const chunk of stream) {
       total += chunk.length;
-      if (total > MAX_DOWNLOAD_BYTES) {
-        stream.destroy();
-        throw new Error("download exceeds maximum size");
-      }
+      if (total > MAX_DOWNLOAD_BYTES) { stream.destroy(); throw new Error("download exceeds maximum size"); }
       chunks.push(chunk);
     }
     return Buffer.concat(chunks, total);
   })();
-  try {
-    return await Promise.race([read, timeout]);
-  } finally {
-    clearTimeout(timer);
-    if (timedOut) read.catch(() => {});
-  }
+  try { return await Promise.race([read, timeout]); }
+  finally { clearTimeout(timer); if (timedOut) read.catch(() => {}); }
 }
 
 async function assertDestinationAvailable(destination) {
-  try {
-    await lstat(destination);
-    throw new Error(`destination already exists: ${destination}`);
-  } catch (err) {
-    if (err?.code !== "ENOENT") throw err;
-  }
+  try { await lstat(destination); throw new Error(`destination already exists: ${destination}`); }
+  catch (err) { if (err?.code !== "ENOENT") throw err; }
 }
 
 async function validateAndWrite({ args, destination, bytes, contentType }) {
@@ -478,6 +355,8 @@ const HANDLERS = {
   async browser_status() {
     const page = pages[activeIndex];
     const pageOpen = Boolean(page && !page.isClosed());
+    let origin = null;
+    if (pageOpen) { try { origin = new URL(page.url()).origin; } catch {} }
     return text({
       runtime: SERVER_INFO.name,
       version: SERVER_INFO.version,
@@ -490,21 +369,15 @@ const HANDLERS = {
       pageOpen,
       humanize: SESSION_CONFIG.humanize,
       url: pageOpen ? page.url() : null,
-      hydratedAuthentication: pageOpen && (() => {
-        try {
-          return verifiedOrigins.has(new URL(page.url()).origin);
-        } catch {
-          return false;
-        }
-      })(),
-      authenticationVerification: pageOpen && hydratedOrigins.has(new URL(page.url()).origin)
-        ? (verifiedOrigins.has(new URL(page.url()).origin) ? "verified" : "pending") : "none",
+      hydratedAuthentication: Boolean(origin && verifiedOrigins.has(origin)),
+      authenticationVerification: origin && hydratedOrigins.has(origin)
+        ? (verifiedOrigins.has(origin) ? "verified" : "pending") : "none",
     });
   },
   async browser_navigate(args) {
     if (typeof args.url !== "string") throw new Error("url is required");
     const waitUntil = args.wait_until === undefined ? "load" : args.wait_until;
-    if (!["commit", "domcontentloaded", "load", "networkidle"].includes(waitUntil)) throw new Error("invalid wait_until");
+    if (!WAIT_UNTIL_ENUM.includes(waitUntil)) throw new Error("invalid wait_until");
     if (args.ready_selector !== undefined && (typeof args.ready_selector !== "string" || !args.ready_selector.trim())) throw new Error("ready_selector must be nonempty text");
     const budget = args.timeout !== undefined || args.ready_selector !== undefined ? boundedWaitMs(args.timeout) : DEFAULT_TIMEOUT;
     await ensureContext();
@@ -525,11 +398,8 @@ const HANDLERS = {
         }
       }
     }
-    // A denied page is not evidence that saved credentials need replacement.
     if (!classification) await verifyHydratedAccount(page, hydration);
-    if (resolveHumanize(args.humanize)) {
-      await applyNavigationDelay(remaining());
-    }
+    if (resolveHumanize(args.humanize)) await applyNavigationDelay(remaining());
     return text(`navigated to ${page.url()} (status ${status ?? "n/a"}${classification})${hydration?.method === "user-confirmed" ? "; user-confirmed state loaded: verify account or requested task access in this context before claiming login success" : ""}`);
   },
   async browser_navigate_back() {
@@ -542,7 +412,7 @@ const HANDLERS = {
   },
   async browser_reload(args = {}) {
     const waitUntil = args.wait_until === undefined ? "load" : args.wait_until;
-    if (!["commit", "domcontentloaded", "load", "networkidle"].includes(waitUntil)) throw new Error("invalid wait_until");
+    if (!WAIT_UNTIL_ENUM.includes(waitUntil)) throw new Error("invalid wait_until");
     const budget = args.timeout !== undefined ? boundedWaitMs(args.timeout) : DEFAULT_TIMEOUT;
     const page = activePage();
     const started = Date.now();
@@ -568,12 +438,7 @@ const HANDLERS = {
         const t = (el.innerText || "").trim();
         if (!t) continue;
         const tag = el.tagName.toLowerCase();
-        if (tag === "h1") parts.push(`# ${t}`);
-        else if (tag === "h2") parts.push(`## ${t}`);
-        else if (tag === "h3") parts.push(`### ${t}`);
-        else if (tag === "li") parts.push(`- ${t}`);
-        else if (tag === "a") parts.push(`[${t}](${el.getAttribute("href") || ""})`);
-        else parts.push(t);
+        parts.push(tag === "h1" ? `# ${t}` : tag === "h2" ? `## ${t}` : tag === "h3" ? `### ${t}` : tag === "li" ? `- ${t}` : tag === "a" ? `[${t}](${el.getAttribute("href") || ""})` : t);
       }
       return parts.join("\n");
     });
@@ -593,11 +458,8 @@ const HANDLERS = {
     const page = activePage();
     const locator = locatorFor(page, args).first();
     await assertActionable(locator, "click");
-    if (resolveHumanize(args.humanize)) {
-      await humanClick(locator, page, { timeout: DEFAULT_TIMEOUT });
-    } else {
-      await locator.click({ timeout: DEFAULT_TIMEOUT });
-    }
+    if (resolveHumanize(args.humanize)) await humanClick(locator, page, { timeout: DEFAULT_TIMEOUT });
+    else await locator.click({ timeout: DEFAULT_TIMEOUT });
     return text(`clicked at ${page.url()}`);
   },
   async browser_fill(args) {
@@ -630,17 +492,12 @@ const HANDLERS = {
     for (const field of args.fields) {
       const loc = locatorFor(page, field).first();
       const type = field.type || "text";
-      if (type === "check") {
+      if (type === "check" || type === "uncheck" || type === "select") {
         await assertActionable(loc, "fill");
-        await loc.check({ timeout: DEFAULT_TIMEOUT });
-      } else if (type === "uncheck") {
-        await assertActionable(loc, "fill");
-        await loc.uncheck({ timeout: DEFAULT_TIMEOUT });
-      } else if (type === "select") {
-        await assertActionable(loc, "fill");
-        await loc.selectOption(field.value, { timeout: DEFAULT_TIMEOUT });
-      }
-      else await fillAndVerify(loc, String(field.value ?? ""));
+        if (type === "check") await loc.check({ timeout: DEFAULT_TIMEOUT });
+        else if (type === "uncheck") await loc.uncheck({ timeout: DEFAULT_TIMEOUT });
+        else await loc.selectOption(field.value, { timeout: DEFAULT_TIMEOUT });
+      } else await fillAndVerify(loc, String(field.value ?? ""));
     }
     if (args.submit_ref || args.submit_selector) {
       const submit = locatorFor(page, { ref: args.submit_ref, selector: args.submit_selector }).first();
@@ -672,27 +529,23 @@ const HANDLERS = {
   async browser_search(args) {
     const page = activePage();
     const limit = Number.isFinite(args.limit) ? args.limit : 10;
-    const matches = await page.evaluate(
-      ({ query, cap }) => {
-        const body = document.body ? document.body.innerText : "";
-        const out = [];
-        let from = 0;
-        while (out.length < cap) {
-          const idx = body.indexOf(query, from);
-          if (idx === -1) break;
-          out.push(body.slice(Math.max(0, idx - 40), idx + query.length + 40));
-          from = idx + query.length;
-        }
-        return out;
-      },
-      { query: args.query, cap: limit },
-    );
+    const matches = await page.evaluate(({ query, cap }) => {
+      const body = document.body ? document.body.innerText : "";
+      const out = [];
+      let from = 0;
+      while (out.length < cap) {
+        const idx = body.indexOf(query, from);
+        if (idx === -1) break;
+        out.push(body.slice(Math.max(0, idx - 40), idx + query.length + 40));
+        from = idx + query.length;
+      }
+      return out;
+    }, { query: args.query, cap: limit });
     return text(matches.length ? matches.map((m, i) => `${i + 1}. ...${m}...`).join("\n") : "(no matches)");
   },
   async browser_extract(args) {
     if (!args.schema || typeof args.schema !== "object") throw new Error("schema object is required");
-    const page = activePage();
-    const result = await page.evaluate((schema) => {
+    const result = await activePage().evaluate((schema) => {
       const out = {};
       for (const [field, spec] of Object.entries(schema)) {
         const list = field.endsWith("[]");
@@ -700,10 +553,7 @@ const HANDLERS = {
         const [sel, attr] = String(spec).split("@");
         const read = (el) => (attr ? el.getAttribute(attr) : el.innerText || "").trim();
         if (list) out[key] = Array.from(document.querySelectorAll(sel)).map(read);
-        else {
-          const el = document.querySelector(sel);
-          out[key] = el ? read(el) : null;
-        }
+        else { const el = document.querySelector(sel); out[key] = el ? read(el) : null; }
       }
       return out;
     }, args.schema);
@@ -713,39 +563,31 @@ const HANDLERS = {
     if (typeof args.expression !== "string") throw new Error("expression is required");
     if (hydratedOrigins.size) throw new Error("browser_evaluate is unavailable while saved authentication state is loaded");
     let value;
-    try {
-      value = await activePage().evaluate(args.expression);
-    } catch (err) {
-      value = `evaluate error: ${err instanceof Error ? err.message : String(err)}`;
-    }
+    try { value = await activePage().evaluate(args.expression); }
+    catch (err) { value = `evaluate error: ${err instanceof Error ? err.message : String(err)}`; }
     return text(value === undefined ? "undefined" : value);
   },
   async browser_console_messages() {
     return text(consoleMessages.join("\n") || "(no console messages)");
   },
   async browser_scroll(args) {
-    const page = activePage();
     const dir = args.direction || "down";
     const amount = Number.isFinite(args.amount) ? args.amount : undefined;
-    await page.evaluate(
-      ({ dir, amount, selector }) => {
-        const target = selector ? document.querySelector(selector) : window;
-        const by = amount || (target === window ? window.innerHeight : 400);
-        if (dir === "top") (target === window ? window.scrollTo(0, 0) : (target.scrollTop = 0));
-        else if (dir === "bottom") (target === window ? window.scrollTo(0, document.body.scrollHeight) : (target.scrollTop = target.scrollHeight));
-        else if (target === window) window.scrollBy(dir === "up" ? -by : by, dir === "left" || dir === "right" ? 0 : 0) || window.scrollBy(0, dir === "up" ? -by : by);
-        else target.scrollTop += dir === "up" ? -by : by;
-      },
-      { dir, amount, selector: args.selector },
-    );
+    await activePage().evaluate(({ dir, amount, selector }) => {
+      const target = selector ? document.querySelector(selector) : window;
+      const by = amount || (target === window ? window.innerHeight : 400);
+      if (dir === "top") (target === window ? window.scrollTo(0, 0) : (target.scrollTop = 0));
+      else if (dir === "bottom") (target === window ? window.scrollTo(0, document.body.scrollHeight) : (target.scrollTop = target.scrollHeight));
+      else if (target === window) window.scrollBy(dir === "up" ? -by : by, 0) || window.scrollBy(0, dir === "up" ? -by : by);
+      else target.scrollTop += dir === "up" ? -by : by;
+    }, { dir, amount, selector: args.selector });
     return text(`scrolled ${dir}`);
   },
   async browser_wait_for(args) {
     const page = activePage();
     const timeout = boundedWaitMs(args.timeout);
-    try {
-      await page.locator(args.selector).first().waitFor({ state: "attached", timeout });
-    } catch (error) {
+    try { await page.locator(args.selector).first().waitFor({ state: "attached", timeout }); }
+    catch (error) {
       if (error?.name === "TimeoutError") throw new Error(`bounded wait expired after ${timeout}ms at ${page.url()}`);
       throw error;
     }
@@ -754,9 +596,8 @@ const HANDLERS = {
   async browser_wait_for_text(args) {
     const page = activePage();
     const timeout = boundedWaitMs(args.timeout);
-    try {
-      await page.getByText(args.text, { exact: false }).first().waitFor({ state: "visible", timeout });
-    } catch (error) {
+    try { await page.getByText(args.text, { exact: false }).first().waitFor({ state: "visible", timeout }); }
+    catch (error) {
       if (error?.name === "TimeoutError") throw new Error(`bounded wait expired after ${timeout}ms at ${page.url()}`);
       throw error;
     }
@@ -779,11 +620,8 @@ const HANDLERS = {
     const locator = locatorFor(page, args).first();
     await assertActionable(locator, "upload", remaining());
     const direct = await locator.evaluate(el => el instanceof HTMLInputElement && el.type === "file");
-    let input;
-    if (direct) input = await locator.elementHandle({ timeout: remaining() });
-    else input = (await clickForEvent(page, locator, "filechooser", remaining())).element();
+    const input = direct ? await locator.elementHandle({ timeout: remaining() }) : (await clickForEvent(page, locator, "filechooser", remaining())).element();
     try {
-      // A hidden input is allowed only when the visible control opened its chooser.
       const allowed = await input.evaluate(el => el instanceof HTMLInputElement && el.type === "file" &&
         !el.matches(":disabled") && el.getAttribute("aria-disabled") !== "true" &&
         !el.hasAttribute("data-visually-disabled") && !el.closest("[inert]"));
@@ -793,8 +631,7 @@ const HANDLERS = {
       if (selected.length !== 1 || selected[0].name !== payload.name || selected[0].size !== payload.buffer.length || selected[0].type !== payload.mimeType) {
         throw new Error("attachment selection could not be verified; inspect the page before retrying");
       }
-      return text({ status: "attached", name: payload.name, bytes: payload.buffer.length, contentType: payload.mimeType,
-        sha256: createHash("sha256").update(payload.buffer).digest("hex") });
+      return text({ status: "attached", name: payload.name, bytes: payload.buffer.length, contentType: payload.mimeType, sha256: createHash("sha256").update(payload.buffer).digest("hex") });
     } finally { await input?.dispose(); }
   },
   async browser_download(args) {
@@ -804,8 +641,7 @@ const HANDLERS = {
     const destination = path.resolve(args.path);
     await assertDestinationAvailable(destination);
     const page = activePage();
-    let bytes;
-    let contentType = "";
+    let bytes, contentType = "";
     if (typeof args.selector === "string" || typeof args.ref === "string") {
       const locator = locatorFor(page, args).first();
       await assertActionable(locator, "download", MAX_WAIT_MS);
@@ -819,44 +655,33 @@ const HANDLERS = {
         const response = responses.find((candidate) => candidate.url() === download.url());
         contentType = response?.headers()["content-type"]?.toLowerCase() || "";
         bytes = await readDownloadStream(download);
-      } finally {
-        page.off("response", recordResponse);
-      }
+      } finally { page.off("response", recordResponse); }
     } else {
       const fetched = await page.evaluate(async ({ url, timeoutMs, maxBytes }) => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      const response = await fetch(url, { credentials: "include", signal: controller.signal });
-      const declared = Number(response.headers.get("content-length"));
-      if (Number.isFinite(declared) && declared > maxBytes) throw new Error("download exceeds maximum size");
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("download response has no body");
-      const chunks = [];
-      let total = 0;
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          total += value.byteLength;
-          if (total > maxBytes) throw new Error("download exceeds maximum size");
-          chunks.push(value);
-        }
-      } finally {
-        clearTimeout(timer);
-      }
-      const bytes = new Uint8Array(total);
-      let offset = 0;
-      for (const chunk of chunks) {
-        bytes.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      let binary = "";
-      for (const byte of bytes) binary += String.fromCharCode(byte);
-      return {
-        status: response.status,
-        contentType: response.headers.get("content-type") || "",
-        data: btoa(binary),
-      };
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        const response = await fetch(url, { credentials: "include", signal: controller.signal });
+        const declared = Number(response.headers.get("content-length"));
+        if (Number.isFinite(declared) && declared > maxBytes) throw new Error("download exceeds maximum size");
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("download response has no body");
+        const chunks = [];
+        let total = 0;
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            total += value.byteLength;
+            if (total > maxBytes) throw new Error("download exceeds maximum size");
+            chunks.push(value);
+          }
+        } finally { clearTimeout(timer); }
+        const bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+        let binary = "";
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        return { status: response.status, contentType: response.headers.get("content-type") || "", data: btoa(binary) };
       }, { url: args.url, timeoutMs: DEFAULT_TIMEOUT, maxBytes: MAX_DOWNLOAD_BYTES });
       if (fetched.status < 200 || fetched.status >= 300) throw new Error(`download request failed with status ${fetched.status}`);
       bytes = Buffer.from(fetched.data, "base64");
@@ -905,20 +730,17 @@ const HANDLERS = {
     }, MAX_MEDIA_PIXELS);
 
     let bytes;
-    const contentType = "image/png";
     if (media.kind === "pixels") {
       const match = /^data:([^;,]+);base64,(.*)$/.exec(media.data);
       if (!match) throw new Error("media did not produce base64 image data");
       bytes = Buffer.from(match[2], "base64");
-    } else {
-      bytes = await locator.screenshot({ type: "png", timeout: DEFAULT_TIMEOUT });
-    }
+    } else bytes = await locator.screenshot({ type: "png", timeout: DEFAULT_TIMEOUT });
 
     const sourceSha256 = createHash("sha256").update(bytes).digest("hex");
     if (typeof args.reject_source_sha256 === "string" && sourceSha256 === args.reject_source_sha256.toLowerCase()) {
       throw new Error("media source matches the rejected fingerprint");
     }
-    const saved = await validateAndWrite({ args, destination, bytes, contentType });
+    const saved = await validateAndWrite({ args, destination, bytes, contentType: "image/png" });
     return text(`media saved to ${destination} (${media.width}x${media.height}, ${saved.bytes} bytes, sha256 ${saved.sha256}, source sha256 ${sourceSha256})`);
   },
   async browser_tab_new(args) {
@@ -956,10 +778,7 @@ const HANDLERS = {
       if (typeof args.humanize !== "boolean") throw new Error("humanize must be boolean");
       SESSION_CONFIG.humanize = args.humanize;
     }
-    return text({
-      configured: true,
-      humanize: SESSION_CONFIG.humanize,
-    });
+    return text({ configured: true, humanize: SESSION_CONFIG.humanize });
   },
   async browser_close() {
     await closeBrowser();
@@ -967,73 +786,40 @@ const HANDLERS = {
   },
 };
 
-// --- JSON-RPC transport ----------------------------------------------------
-
-function send(message) {
-  process.stdout.write(`${JSON.stringify(message)}\n`);
-}
-function reply(id, result) {
-  if (id === undefined || id === null) return;
-  send({ jsonrpc: "2.0", id, result });
-}
-function replyError(id, message) {
-  if (id === undefined || id === null) return;
-  send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: message }], isError: true } });
-}
+const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
+const reply = (id, result) => { if (id !== undefined && id !== null) send({ jsonrpc: "2.0", id, result }); };
+const replyError = (id, message) => {
+  if (id !== undefined && id !== null) send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: message }], isError: true } });
+};
 
 async function handle(message) {
   const { id, method, params } = message || {};
-  if (method === "initialize") {
-    reply(id, { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER_INFO });
-    return;
-  }
+  if (method === "initialize") return reply(id, { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER_INFO });
   if (method === "notifications/initialized" || method === "notifications/cancelled") return;
-  if (method === "tools/list") {
-    reply(id, { tools: TOOLS });
-    return;
-  }
-  if (method === "ping") {
-    reply(id, {});
-    return;
-  }
+  if (method === "tools/list") return reply(id, { tools: TOOLS });
+  if (method === "ping") return reply(id, {});
   if (method === "tools/call") {
     const name = params?.name;
     const args = params?.arguments || {};
-    if (!TOOL_NAMES.has(name)) {
-      replyError(id, `unknown tool: ${name}`);
-      return;
-    }
-    try {
-      const result = await HANDLERS[name](args);
-      reply(id, result);
-    } catch (err) {
-      replyError(id, `${name} failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    if (!TOOL_NAMES.has(name)) return replyError(id, `unknown tool: ${name}`);
+    try { reply(id, await HANDLERS[name](args)); }
+    catch (err) { replyError(id, `${name} failed: ${err instanceof Error ? err.message : String(err)}`); }
     return;
   }
-  if (id !== undefined && id !== null) {
-    send({ jsonrpc: "2.0", id, error: { code: -32601, message: `method not found: ${method}` } });
-  }
+  if (id !== undefined && id !== null) send({ jsonrpc: "2.0", id, error: { code: -32601, message: `method not found: ${method}` } });
 }
 
-// Serialize handling so browser operations do not interleave.
 let queue = Promise.resolve();
 const reader = createInterface({ input: process.stdin });
 reader.on("line", (line) => {
   if (!line.trim()) return;
   let message;
-  try {
-    message = JSON.parse(line);
-  } catch {
-    return;
-  }
+  try { message = JSON.parse(line); } catch { return; }
   queue = queue.then(() => handle(message)).catch((err) => {
     process.stderr.write(`prometheus-browser: handler error: ${err instanceof Error ? err.stack : String(err)}\n`);
   });
 });
-reader.on("close", () => {
-  queue = queue.then(() => closeBrowser()).finally(() => process.exit(0));
-});
+reader.on("close", () => { queue = queue.then(() => closeBrowser()).finally(() => process.exit(0)); });
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => { void closeBrowser().finally(() => process.exit(signal === "SIGINT" ? 130 : 143)); });
 }
