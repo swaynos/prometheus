@@ -28,10 +28,9 @@ The MCP and login helper read `<config_dir>/prometheus-browser.json`:
 `channel` accepts `default`, `chromium` (full Chromium), or `chrome` (installed
 Google Chrome). `executionMode` defaults to `headless`; `automationCompatibility`
 defaults to false. When enabled, compatibility mode omits `--enable-automation`,
-adds `--disable-blink-features=AutomationControlled`, hides the automation
-property by changing `navigator.webdriver` so page scripts receive `undefined`,
-and sets `navigator.languages` to `['en-US', 'en']` and `navigator.plugins` to
-`[1, 2, 3, 4, 5]`. Optional `profile` selects a source-backed device/desktop emulation preset, with an explicit ID or seeded filters. Optional `identityProfile` retains the legacy JavaScript-only identity experiments; these are not verified coherent hardware identities. See the repository's `docs/BROWSER-PROFILES.md` for the catalog, engine requirements, reproducibility, and limitations.
+adds `--disable-blink-features=AutomationControlled` (so `navigator.webdriver`
+remains `false` while preserving native `PluginArray` and iframe prototype
+consistency), and strips `HeadlessChrome` from the default user agent. Optional `profile` selects a source-backed device/desktop emulation preset, with an explicit ID or seeded filters. Optional `identityProfile` retains the legacy JavaScript-only identity experiments; these are not verified coherent hardware identities. See the repository's `docs/BROWSER-PROFILES.md` for the catalog, engine requirements, reproducibility, and limitations.
 
 The settings file takes precedence over inherited environment values. Without
 it, `PROMETHEUS_BROWSER_CHANNEL`, `PROMETHEUS_BROWSER_EXECUTION_MODE`,
@@ -293,8 +292,10 @@ Use short bounded waits that leave the browser usable. Explicit navigation may
 recreate a closed page. Treat HTTP 401/403 and Cloudflare challenges as access
 denial: report the blocker rather than automatically navigating, recapturing
 login, restarting, or changing browser settings to bypass it.
-Navigation reports denial before checking saved-account evidence or an optional
-readiness selector. Recognized challenge pages can be reported even with HTTP
+Navigation and `browser_reload` report denial before checking saved-account
+evidence or an optional readiness selector. `browser_reload` also allows active
+in-flight network requests to settle before reloading and accepts `wait_until`
+and `timeout`. Recognized challenge pages can be reported even with HTTP
 200. An ordinary page that mentions Cloudflare is not sufficient challenge
 evidence. These reports do not add a new workflow-switch or tool-use gate.
 

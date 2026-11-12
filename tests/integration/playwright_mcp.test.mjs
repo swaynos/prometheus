@@ -181,6 +181,9 @@ test("Playwright MCP server drives a headless page over JSON-RPC", async () => {
     const nav = c.textOf(await c.call("browser_navigate", { url: `${base}/` }));
     assert.match(nav, /status 200/);
 
+    const reloaded = c.textOf(await c.call("browser_reload", { wait_until: "networkidle" }));
+    assert.match(reloaded, /reloaded .* \(status 200\)/);
+
     const snap = c.textOf(await c.call("browser_snapshot", {}));
     assert.match(snap, /Fixture Home/);
 
