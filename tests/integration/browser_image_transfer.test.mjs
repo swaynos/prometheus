@@ -1,44 +1,28 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { createInterface } from "node:readline";
 import { mkdtemp, mkdir, writeFile, readFile, symlink, rm } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { spawnMcpClient, hasXvfb } from "./helpers.mjs";
 
-const server = process.env.PROMETHEUS_TEST_BROWSER_SERVER || path.resolve(import.meta.dirname, "../../scripts/opencode-playwright-mcp.mjs");
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const sha256 = createHash("sha256").update(png).digest("hex");
-const hasXvfb = spawnSync("sh", ["-c", "command -v Xvfb && command -v xvfb-run && command -v xauth"], { stdio: "ignore" }).status === 0;
 
 function client(root, env = {}) {
-  const child = spawn(process.execPath, [server], { env: { ...process.env, PROMETHEUS_CONFIG_DIR: root,
-    PROMETHEUS_VIRTUAL_DISPLAY: "", PROMETHEUS_BROWSER_MAX_WAIT_MS: "1500", PROMETHEUS_BROWSER_MAX_UPLOAD_BYTES: "1024", ...env }, stdio: ["pipe", "pipe", "pipe"] });
-  const exited = once(child, "exit");
-  let id = 0, stderr = "";
-  const pending = new Map();
-  child.stderr.on("data", chunk => { stderr += chunk; });
-  createInterface({ input: child.stdout }).on("line", line => {
-    const response = JSON.parse(line);
-    pending.get(response.id)?.resolve(response.result);
-  });
-  child.once("exit", () => { for (const item of pending.values()) item.reject(new Error(`service exited: ${stderr}`)); });
-  function rpc(method, params) {
-    const requestId = ++id;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { pending.delete(requestId); reject(new Error("RPC timeout")); }, 15000);
-      pending.set(requestId, {
-        resolve: result => { clearTimeout(timer); pending.delete(requestId); resolve(result); },
-        reject: error => { clearTimeout(timer); pending.delete(requestId); reject(error); },
-      });
-      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: requestId, method, params })}\n`);
-    });
-  }
-  return { rpc, call: (name, args = {}) => rpc("tools/call", { name, arguments: args }),
-    async close() { child.stdin.end(); assert.equal((await exited)[0], 0, stderr); },
+  const c = spawnMcpClient({
+    PROMETHEUS_CONFIG_DIR: root,
+    PROMETHEUS_VIRTUAL_DISPLAY: "",
+    PROMETHEUS_BROWSER_MAX_WAIT_MS: "1500",
+    PROMETHEUS_BROWSER_MAX_UPLOAD_BYTES: "1024",
+    ...env,
+  }, { timeoutMs: 15000, captureStderr: true });
+  return {
+    rpc: async (method, params) => (await c.rpc(method, params)).result,
+    call: c.call,
+    async close() { assert.equal((await c.close())[0], 0, c.errors()); },
   };
 }
 
@@ -46,17 +30,17 @@ async function fixture() {
   const uploads = [], downloads = [];
   const httpServer = http.createServer(async (req, res) => {
     if (req.url === "/upload") {
-      if (!req.headers.cookie?.includes("fixture=approved")) { res.writeHead(403).end(); return; }
+      if (!req.headers.cookie?.includes("fixture=approved")) return res.writeHead(403).end();
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       uploads.push(Buffer.concat(chunks));
-      res.end("Attached fixture.png"); return;
+      return res.end("Attached fixture.png");
     }
     if (req.url === "/image") {
-      if (!req.headers.cookie?.includes("fixture=approved")) { res.writeHead(403).end(); return; }
+      if (!req.headers.cookie?.includes("fixture=approved")) return res.writeHead(403).end();
       downloads.push(req.url);
       res.writeHead(200, { "content-type": "image/png", "content-disposition": "attachment; filename=result.png" });
-      res.end(uploads.at(-1) || png); return;
+      return res.end(uploads.at(-1) || png);
     }
     res.setHeader("set-cookie", "fixture=approved; Path=/");
     res.setHeader("content-type", "text/html");
@@ -118,7 +102,6 @@ for (const executionMode of ["headless", "virtual-display"]) {
       assert.equal((await c.call("browser_wait_for_text", { text: "Attached fixture.png" })).isError, undefined);
       assert.deepEqual(site.uploads, [png]);
 
-      // Use an observed ref for the download control.
       const controls = text(await c.call("browser_interactive_elements"));
       const ref = /^(e\d+) <a> Download image$/m.exec(controls)?.[1]; assert.ok(ref);
       const output = path.join(root, "result.png");
@@ -155,15 +138,15 @@ for (const executionMode of ["headless", "virtual-display"]) {
         { selector: "#attach", path: "fixture.png" },
         { selector: "#no-chooser", path: source },
       ]) assert.equal((await c.call("browser_upload_image", args)).isError, true, JSON.stringify(args));
-      assert.equal(site.uploads.length, 2, "rejected uploads never transmit a file");
-      assert.equal((await c.call("browser_upload_image", { selector: "#attach", path: source })).isError, undefined, "chooser timeout leaves the page usable");
+      assert.equal(site.uploads.length, 2);
+      assert.equal((await c.call("browser_upload_image", { selector: "#attach", path: source })).isError, undefined);
       await c.call("browser_wait_for_text", { text: "Attached fixture.png" });
       await c.call("browser_navigate", { url: site.base });
       const reset = await c.call("browser_upload_image", { selector: "#reset", path: source });
       assert.equal(reset.isError, true);
       assert.match(text(reset), /inspect the page before retrying/);
       await c.call("browser_wait_for_text", { text: "Attached fixture.png" });
-      assert.equal(site.uploads.length, 4, "a cleared input is unconfirmed, not retried automatically");
+      assert.equal(site.uploads.length, 4);
     } finally { await c.close(); site.close(); await rm(root, { recursive: true, force: true }); }
   });
 }

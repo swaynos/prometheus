@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import net from "node:net";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { BROWSER_PROFILES, getBrowserProfile, resolveBrowserProfile, browserProfileInfo } from "./browser-profiles.mjs";
 
@@ -90,13 +90,11 @@ function validateCdpOptions(value) {
 
 export function validateBrowserConfig(config) {
   if (!config || typeof config !== "object" || Array.isArray(config) ||
-       Object.keys(config).some((key) => !["channel", "profile", "automationCompatibility", "executionMode", "launchOptions", "contextOptions", "cdpOptions", "identityProfile", "humanize"].includes(key)) ||
+      Object.keys(config).some((key) => !["channel", "profile", "automationCompatibility", "executionMode", "launchOptions", "contextOptions", "cdpOptions", "identityProfile", "humanize"].includes(key)) ||
       !["default", "chromium", "chrome", "msedge"].includes(config.channel)) {
     throw new Error("browser must specify channel: default, chromium, chrome, or msedge");
   }
-  if (config.humanize !== undefined && typeof config.humanize !== "boolean") {
-    throw new Error("humanize must be boolean");
-  }
+  if (config.humanize !== undefined && typeof config.humanize !== "boolean") throw new Error("humanize must be boolean");
   if (config.automationCompatibility !== undefined && typeof config.automationCompatibility !== "boolean") {
     throw new Error("automationCompatibility must be boolean");
   }
@@ -125,14 +123,17 @@ export function validateBrowserConfig(config) {
     if (Object.keys(config.contextOptions ?? {}).some(key => key in profile.contextOptions)) throw new Error("profile display settings cannot be overridden; select a different profile");
   }
   if (config.identityProfile && mode === "external-cdp") throw new Error("identity profiles are not supported with external-cdp");
-  return { channel: config.channel, ...(config.automationCompatibility !== undefined ? { automationCompatibility: config.automationCompatibility } : {}),
+  return {
+    channel: config.channel,
+    ...(config.automationCompatibility !== undefined ? { automationCompatibility: config.automationCompatibility } : {}),
     ...(config.humanize !== undefined ? { humanize: config.humanize } : {}),
     ...(config.profile !== undefined ? { profile: profile.id } : {}),
     ...(config.identityProfile !== undefined ? { identityProfile: config.identityProfile } : {}),
     ...(mode === "virtual-display" || mode === "external-cdp" ? { executionMode: mode } : {}),
     ...(config.launchOptions !== undefined ? { launchOptions: validateLaunchOptions(config.launchOptions) } : {}),
     ...(config.contextOptions !== undefined ? { contextOptions: validateContextOptions(config.contextOptions) } : {}),
-    ...(config.cdpOptions !== undefined ? { cdpOptions: validateCdpOptions(config.cdpOptions) } : {}) };
+    ...(config.cdpOptions !== undefined ? { cdpOptions: validateCdpOptions(config.cdpOptions) } : {}),
+  };
 }
 
 export function browserConfigFromEnv(env = process.env) {
@@ -148,43 +149,43 @@ export function browserConfigFromEnv(env = process.env) {
   }
   const compatibility = env.PROMETHEUS_BROWSER_AUTOMATION_COMPATIBILITY;
   if (compatibility !== undefined && !["true", "false"].includes(compatibility)) throw new Error("invalid browser automation compatibility setting");
-  const identityProfileEnv = env.PROMETHEUS_BROWSER_IDENTITY_PROFILE;
-  let identityProfile;
-  if (identityProfileEnv !== undefined) {
-    if (identityProfileEnv === "true" || identityProfileEnv === "1") identityProfile = true;
-    else if (identityProfileEnv === "false" || identityProfileEnv === "0") identityProfile = false;
-    else identityProfile = identityProfileEnv;
-  }
+  const rawIdentity = env.PROMETHEUS_BROWSER_IDENTITY_PROFILE;
+  const identityProfile = rawIdentity === "true" || rawIdentity === "1" ? true
+    : rawIdentity === "false" || rawIdentity === "0" ? false : rawIdentity;
   const cdpPort = env.PROMETHEUS_BROWSER_CDP_PORT ? Number(env.PROMETHEUS_BROWSER_CDP_PORT) : undefined;
   const cdpEndpoint = env.PROMETHEUS_BROWSER_CDP_ENDPOINT || undefined;
   const cdpUserDataDir = env.PROMETHEUS_BROWSER_CDP_USER_DATA_DIR || undefined;
-  const cdpOptions = (cdpPort !== undefined || cdpEndpoint !== undefined || cdpUserDataDir !== undefined) ? {
+  const cdpOptions = cdpPort !== undefined || cdpEndpoint !== undefined || cdpUserDataDir !== undefined ? {
     ...(cdpPort !== undefined ? { port: cdpPort } : {}),
     ...(cdpEndpoint !== undefined ? { endpoint: cdpEndpoint } : {}),
     ...(cdpUserDataDir !== undefined ? { userDataDir: cdpUserDataDir } : {}),
   } : undefined;
-  const humanizeEnv = env.PROMETHEUS_BROWSER_HUMANIZE;
   let humanize;
-  if (humanizeEnv !== undefined) {
-    if (["true", "1", "yes", "on"].includes(humanizeEnv.trim().toLowerCase())) humanize = true;
-    else if (["false", "0", "no", "off"].includes(humanizeEnv.trim().toLowerCase())) humanize = false;
+  if (env.PROMETHEUS_BROWSER_HUMANIZE !== undefined) {
+    const raw = env.PROMETHEUS_BROWSER_HUMANIZE.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(raw)) humanize = true;
+    else if (["false", "0", "no", "off"].includes(raw)) humanize = false;
     else throw new Error("invalid browser humanize setting");
   }
-  return validateBrowserConfig({ channel: env.PROMETHEUS_BROWSER_CHANNEL || "default",
+  return validateBrowserConfig({
+    channel: env.PROMETHEUS_BROWSER_CHANNEL || "default",
     ...(compatibility !== undefined ? { automationCompatibility: compatibility === "true" } : {}),
     ...(env.PROMETHEUS_BROWSER_PROFILE ? { profile: env.PROMETHEUS_BROWSER_PROFILE } : {}),
     ...(identityProfile !== undefined ? { identityProfile } : {}),
     ...(humanize !== undefined ? { humanize } : {}),
     executionMode: env.PROMETHEUS_BROWSER_EXECUTION_MODE,
-    ...(cdpOptions ? { cdpOptions } : {}) });
+    ...(cdpOptions ? { cdpOptions } : {}),
+  });
 }
 
 export function browserLaunchOptions(config, headless) {
   const selected = validateBrowserConfig(config);
   const { automationCompatibility, executionMode, launchOptions } = selected;
-  const profile = configuredProfile(selected);
-  const channel = profile?.channel === "msedge" ? "msedge" : selected.channel;
-  return { ...launchOptions, headless: headless ?? executionMode !== "virtual-display", ...(channel === "default" ? {} : { channel }),
+  const channel = configuredProfile(selected)?.channel === "msedge" ? "msedge" : selected.channel;
+  return {
+    ...launchOptions,
+    headless: headless ?? executionMode !== "virtual-display",
+    ...(channel === "default" ? {} : { channel }),
     ...(automationCompatibility ? {
       ignoreDefaultArgs: ["--enable-automation"],
       args: ["--disable-blink-features=AutomationControlled"],
@@ -195,13 +196,17 @@ export function browserLaunchOptions(config, headless) {
 export function browserContextOptions(config) {
   const selected = validateBrowserConfig(config);
   const profile = configuredProfile(selected);
-  return { viewport: { width: 1280, height: 1024 },
-    ...(profile ? structuredClone(profile.contextOptions) : {}), ...selected.contextOptions };
+  return {
+    viewport: { width: 1280, height: 1024 },
+    ...(profile ? structuredClone(profile.contextOptions) : {}),
+    ...selected.contextOptions,
+  };
 }
 
 function configuredProfile(selected) {
   if (selected.profile) return getBrowserProfile(selected.profile);
-  return typeof selected.identityProfile === "string" && selected.identityProfile !== "random" ? getBrowserProfile(selected.identityProfile) : null;
+  return typeof selected.identityProfile === "string" && selected.identityProfile !== "random"
+    ? getBrowserProfile(selected.identityProfile) : null;
 }
 
 export async function selectBrowserType(chromium, config, engines) {
@@ -213,8 +218,6 @@ export async function selectBrowserType(chromium, config, engines) {
   return available[engine];
 }
 
-// Explicit, non-secret observation for research fixtures. No storage or page content is read.
-// Call on an already-loaded, approved page; UA client hints require a secure context.
 export async function collectBrowserProfileEvidence(page) {
   return page.evaluate(async () => {
     const graphics = type => {
@@ -224,7 +227,6 @@ export async function collectBrowserProfileEvidence(page) {
         return ext ? { vendor: gl.getParameter(ext.UNMASKED_VENDOR_WEBGL), renderer: gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) } : null;
       } catch { return null; }
     };
-    // Low-entropy values only; do not request additional identifying information.
     return {
       userAgent: navigator.userAgent, platform: navigator.platform,
       clientHints: navigator.userAgentData?.toJSON?.() ?? null,
@@ -235,12 +237,11 @@ export async function collectBrowserProfileEvidence(page) {
   });
 }
 
-// Metadata only: this does not open a browser or inspect saved authentication.
 export function browserRuntimeInfo(config) {
   const selected = validateBrowserConfig(config);
   const profile = configuredProfile(selected);
   let playwrightVersion = null;
-  try { playwrightVersion = require("playwright/package.json").version; } catch { /* Missing dependencies remain visible at launch. */ }
+  try { playwrightVersion = require("playwright/package.json").version; } catch {}
   return {
     playwrightVersion,
     nodeVersion: process.versions.node,
@@ -263,17 +264,14 @@ export function resolveChromeExecutablePath(chromium, channel) {
     if (process.platform === "darwin" && fs.existsSync(macChrome)) return macChrome;
     for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]) {
       try {
-        const full = require("node:child_process").execSync(`which ${name} 2>/dev/null`, { encoding: "utf8" }).trim();
+        const full = execSync(`which ${name} 2>/dev/null`, { encoding: "utf8" }).trim();
         if (full && fs.existsSync(full)) return full;
       } catch {}
     }
   }
   if (typeof chromium?.executablePath === "function") {
-    try {
-      return chromium.executablePath({ channel: channel === "default" ? undefined : channel });
-    } catch {
-      return chromium.executablePath();
-    }
+    try { return chromium.executablePath({ channel: channel === "default" ? undefined : channel }); }
+    catch { return chromium.executablePath(); }
   }
   throw new Error("unable to locate browser executable");
 }
@@ -282,7 +280,7 @@ function getFreePort() {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
     srv.listen(0, "127.0.0.1", () => {
-      const port = srv.address().port;
+      const { port } = srv.address();
       srv.close((err) => (err ? reject(err) : resolve(port)));
     });
     srv.on("error", reject);
@@ -293,110 +291,62 @@ async function waitForCdp(endpoint, timeoutMs = 15000) {
   const start = Date.now();
   const versionUrl = new URL("/json/version", endpoint).href;
   while (Date.now() - start < timeoutMs) {
-    try {
-      const res = await fetch(versionUrl);
-      if (res.ok) return;
-    } catch {}
+    try { if ((await fetch(versionUrl)).ok) return; } catch {}
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error(`timed out waiting for remote debugging on ${endpoint}`);
 }
 
 export async function applyAutomationCompatibility(context) {
-  if (typeof context?.addInitScript === "function") {
-    await context.addInitScript(() => {
-      try {
-        if (/HeadlessChrome/.test(navigator.userAgent)) {
-          const cleanUa = navigator.userAgent.replace(/HeadlessChrome/, "Chrome");
-          Object.defineProperty(Object.getPrototypeOf(navigator), "userAgent", {
-            get: () => cleanUa,
-            configurable: true,
-          });
-        }
-      } catch {}
-    });
-  }
+  if (typeof context?.addInitScript !== "function") return;
+  await context.addInitScript(() => {
+    try {
+      if (/HeadlessChrome/.test(navigator.userAgent)) {
+        const cleanUa = navigator.userAgent.replace(/HeadlessChrome/, "Chrome");
+        Object.defineProperty(Object.getPrototypeOf(navigator), "userAgent", { get: () => cleanUa, configurable: true });
+      }
+    } catch {}
+  });
 }
 
 export async function applyBrowserProfile(context, profile) {
-  // Preserve the explicit legacy experiment only; upstream presets have no observed GPU identity.
-  if (profile?.validation !== "unverified-legacy-preset") return;
-  if (typeof context?.addInitScript === "function" && profile) {
-    await context.addInitScript((prof) => {
-      try {
-        Object.defineProperty(Object.getPrototypeOf(navigator), "platform", {
-          get: () => prof.platform,
-          configurable: true,
-        });
-      } catch {
-        try {
-          Object.defineProperty(navigator, "platform", {
-            get: () => prof.platform,
-            configurable: true,
-          });
-        } catch {}
+  if (profile?.validation !== "unverified-legacy-preset" || typeof context?.addInitScript !== "function") return;
+  await context.addInitScript((prof) => {
+    const defineNav = (prop, value) => {
+      for (const target of [Object.getPrototypeOf(navigator), navigator]) {
+        try { Object.defineProperty(target, prop, { get: () => value, configurable: true }); return; } catch {}
       }
-
-      try {
-        if (navigator.userAgentData) {
-          const uad = {
-            brands: prof.brands,
-            mobile: false,
-            platform: prof.os,
-            getHighEntropyValues: async (hints = []) => {
-              const res = { brands: prof.brands, mobile: false, platform: prof.os };
-              if (hints.includes("platformVersion")) res.platformVersion = prof.os === "Windows" ? "15.0.0" : "14.4.1";
-              if (hints.includes("architecture")) res.architecture = "x86";
-              if (hints.includes("bitness")) res.bitness = "64";
-              if (hints.includes("model")) res.model = "";
-              return res;
-            },
-            toJSON: () => ({ brands: prof.brands, mobile: false, platform: prof.os }),
-          };
-          Object.defineProperty(Object.getPrototypeOf(navigator), "userAgentData", {
-            get: () => uad,
-            configurable: true,
-          });
-        }
-      } catch {
-        try {
-          if (navigator.userAgentData) {
-            Object.defineProperty(navigator, "userAgentData", {
-              get: () => ({ brands: prof.brands, mobile: false, platform: prof.os }),
-              configurable: true,
-            });
-          }
-        } catch {}
-      }
-
-      const overrideGl = (proto) => {
-        if (!proto || !proto.getParameter) return;
-        const orig = proto.getParameter;
-        proto.getParameter = function (parameter) {
-          if (parameter === 37445) return prof.glVendor;
-          if (parameter === 37446) return prof.glRenderer;
-          return orig.apply(this, arguments);
+    };
+    defineNav("platform", prof.platform);
+    if (navigator.userAgentData) {
+      const base = { brands: prof.brands, mobile: false, platform: prof.os };
+      defineNav("userAgentData", {
+        ...base,
+        getHighEntropyValues: async (hints = []) => ({
+          ...base,
+          ...(hints.includes("platformVersion") ? { platformVersion: prof.os === "Windows" ? "15.0.0" : "14.4.1" } : {}),
+          ...(hints.includes("architecture") ? { architecture: "x86" } : {}),
+          ...(hints.includes("bitness") ? { bitness: "64" } : {}),
+          ...(hints.includes("model") ? { model: "" } : {}),
+        }),
+        toJSON: () => base,
+      });
+    }
+    const overrideGl = (proto) => {
+      if (!proto?.getParameter) return;
+      const orig = proto.getParameter;
+      proto.getParameter = function (p) { return p === 37445 ? prof.glVendor : p === 37446 ? prof.glRenderer : orig.apply(this, arguments); };
+      if (proto.getExtension) {
+        const origExt = proto.getExtension;
+        proto.getExtension = function (name) {
+          const ext = origExt.apply(this, arguments);
+          return name === "WEBGL_debug_renderer_info" ? ext || { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 } : ext;
         };
-        if (proto.getExtension) {
-          const origExt = proto.getExtension;
-          proto.getExtension = function (name) {
-            if (name === "WEBGL_debug_renderer_info") {
-              const ext = origExt.apply(this, arguments);
-              return ext || { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
-            }
-            return origExt.apply(this, arguments);
-          };
-        }
-      };
-
-      try {
-        if (typeof WebGLRenderingContext !== "undefined") overrideGl(WebGLRenderingContext.prototype);
-      } catch {}
-      try {
-        if (typeof WebGL2RenderingContext !== "undefined") overrideGl(WebGL2RenderingContext.prototype);
-      } catch {}
-    }, profile);
-  }
+      }
+    };
+    try { if (typeof WebGLRenderingContext !== "undefined") overrideGl(WebGLRenderingContext.prototype); } catch {}
+    try { if (typeof WebGL2RenderingContext !== "undefined") overrideGl(WebGL2RenderingContext.prototype); } catch {}
+  }, profile);
 }
 
 export function resolveIdentityProfile(selected) {
@@ -413,29 +363,30 @@ export function nativeChromiumUserAgent(browserVersion, platform = process.platf
   return `Mozilla/5.0 (${osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36${suffix}`;
 }
 
+async function prepareContext(context, selected, profile) {
+  if (selected?.automationCompatibility) await applyAutomationCompatibility(context);
+  if (profile) await applyBrowserProfile(context, profile);
+}
+
 export async function launchExternalCdpContext(chromium, selected, options = {}) {
-  if (selected.automationCompatibility === undefined) {
-    selected = { ...selected, automationCompatibility: true };
-  }
+  if (selected.automationCompatibility === undefined) selected = { ...selected, automationCompatibility: true };
   const cdp = selected.cdpOptions || {};
   let endpoint = cdp.endpoint;
   let child = null;
   let tempUserDataDir = null;
+  const cleanupProcess = () => {
+    if (child && !child.killed) { try { child.kill("SIGTERM"); } catch {} }
+    if (tempUserDataDir) { try { fs.rmSync(tempUserDataDir, { recursive: true, force: true }); } catch {} }
+  };
 
   if (!endpoint) {
     const port = cdp.port ?? (await getFreePort());
     endpoint = `http://127.0.0.1:${port}`;
-
-    let userDataDir = cdp.userDataDir;
-    if (!userDataDir) {
-      tempUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "prometheus-cdp-"));
-      userDataDir = tempUserDataDir;
-    }
-
+    const userDataDir = cdp.userDataDir || (tempUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "prometheus-cdp-")));
     const execPath = resolveChromeExecutablePath(chromium, selected.channel);
     const headless = options.headless ?? selected.launchOptions?.headless ?? (selected.executionMode !== "virtual-display");
     const ua = selected.contextOptions?.userAgent;
-    const args = [
+    child = spawn(execPath, [
       ...(headless ? ["--headless=new"] : []),
       "--remote-debugging-address=127.0.0.1",
       `--remote-debugging-port=${port}`,
@@ -445,70 +396,28 @@ export async function launchExternalCdpContext(chromium, selected, options = {})
       ...(selected.automationCompatibility ? ["--disable-blink-features=AutomationControlled"] : []),
       ...(ua ? [`--user-agent=${ua}`] : []),
       "about:blank",
-    ];
-
-    child = spawn(execPath, args, { stdio: "ignore" });
-
-    const killChild = () => {
-      if (child && !child.killed) {
-        try { child.kill("SIGTERM"); } catch {}
-      }
-      if (tempUserDataDir) {
-        try { fs.rmSync(tempUserDataDir, { recursive: true, force: true }); } catch {}
-      }
-    };
-
-    try {
-      await waitForCdp(endpoint, cdp.timeout ?? 15000);
-    } catch (err) {
-      killChild();
-      throw err;
-    }
+    ], { stdio: "ignore" });
+    try { await waitForCdp(endpoint, cdp.timeout ?? 15000); }
+    catch (err) { cleanupProcess(); throw err; }
   }
 
   let browser;
-  try {
-    browser = await chromium.connectOverCDP(endpoint, { timeout: cdp.timeout ?? 15000 });
-  } catch (err) {
-    if (child && !child.killed) {
-      try { child.kill("SIGTERM"); } catch {}
-    }
-    if (tempUserDataDir) {
-      try { fs.rmSync(tempUserDataDir, { recursive: true, force: true }); } catch {}
-    }
-    throw err;
-  }
+  try { browser = await chromium.connectOverCDP(endpoint, { timeout: cdp.timeout ?? 15000 }); }
+  catch (err) { cleanupProcess(); throw err; }
 
   const origClose = browser.close.bind(browser);
   browser.close = async () => {
-    try {
-      await origClose().catch(() => {});
-    } finally {
-      if (child && !child.killed) {
-        try { child.kill("SIGTERM"); } catch {}
-      }
-      if (tempUserDataDir) {
-        try { fs.rmSync(tempUserDataDir, { recursive: true, force: true }); } catch {}
-      }
-    }
+    try { await origClose().catch(() => {}); }
+    finally { cleanupProcess(); }
   };
 
   try {
     const profile = resolveIdentityProfile(selected);
     const contextOptions = browserContextOptions(selected);
-    if (profile?.userAgent && !contextOptions.userAgent) {
-      contextOptions.userAgent = profile.userAgent;
-    }
-    const existingContexts = browser.contexts ? browser.contexts() : [];
-    const context = existingContexts.length > 0
-      ? existingContexts[0]
-      : await browser.newContext(contextOptions);
-    if (selected.automationCompatibility) {
-      await applyAutomationCompatibility(context);
-    }
-    if (profile) {
-      await applyBrowserProfile(context, profile);
-    }
+    if (profile?.userAgent && !contextOptions.userAgent) contextOptions.userAgent = profile.userAgent;
+    const existing = browser.contexts ? browser.contexts() : [];
+    const context = existing.length > 0 ? existing[0] : await browser.newContext(contextOptions);
+    await prepareContext(context, selected, profile);
     return { browser, context };
   } catch (error) {
     await browser.close().catch(() => {});
@@ -518,27 +427,20 @@ export async function launchExternalCdpContext(chromium, selected, options = {})
 
 export async function createTaskContext(chromium, config, engines) {
   let selected = validateBrowserConfig(config);
-  // Resolve legacy randomness exactly once; downstream settings and metadata use the same ID.
   if (selected.identityProfile === true || selected.identityProfile === "random") {
     selected = validateBrowserConfig({ ...selected, identityProfile: resolveIdentityProfile(selected).id });
   }
-  if (selected.automationCompatibility === undefined) {
-    const engine = configuredProfile(selected)?.engine ?? "chromium";
-    if (engine === "chromium") {
-      selected = { ...selected, automationCompatibility: true };
-    }
+  if (selected.automationCompatibility === undefined && (configuredProfile(selected)?.engine ?? "chromium") === "chromium") {
+    selected = { ...selected, automationCompatibility: true };
   }
   if (selected.executionMode === "virtual-display" && (!process.env.DISPLAY || process.env.PROMETHEUS_VIRTUAL_DISPLAY !== "1")) {
     throw new Error("virtual-display mode requires the managed Xvfb service launcher");
   }
-  if (selected.executionMode === "external-cdp") {
-    return launchExternalCdpContext(chromium, selected);
-  }
+  if (selected.executionMode === "external-cdp") return launchExternalCdpContext(chromium, selected);
+
   const profile = resolveIdentityProfile(selected);
   const contextOptions = browserContextOptions(selected);
-  if (profile?.userAgent && !contextOptions.userAgent) {
-    contextOptions.userAgent = profile.userAgent;
-  }
+  if (profile?.userAgent && !contextOptions.userAgent) contextOptions.userAgent = profile.userAgent;
   const browserType = await selectBrowserType(chromium, selected, engines);
   const browser = await browserType.launch(browserLaunchOptions(selected));
   try {
@@ -547,21 +449,17 @@ export async function createTaskContext(chromium, config, engines) {
       contextOptions.userAgent = nativeChromiumUserAgent(browserVersion, process.platform, selected.channel);
     }
     const context = await browser.newContext(contextOptions);
-    if (selected.automationCompatibility) {
-      await applyAutomationCompatibility(context);
-    }
-    if (profile) {
-      await applyBrowserProfile(context, profile);
-    }
+    await prepareContext(context, selected, profile);
     const runtime = configuredProfile(selected) || selected.automationCompatibility
       ? { ...browserRuntimeInfo(selected), contextOptions: structuredClone(contextOptions), browserVersion }
       : undefined;
     return { browser, context, ...(runtime ? { runtime } : {}) };
+  } catch (error) {
+    await browser.close().catch(() => {});
+    throw error;
   }
-  catch (error) { await browser.close().catch(() => {}); throw error; }
 }
 
-// Input must come from the origin-scoped state store, never model-provided state.
 export async function hydrateBrowserState(context, loaded) {
   const cookies = loaded.storageState?.cookies || [];
   const localStores = loaded.storageState?.origins || [];

@@ -1,8 +1,8 @@
-# Verification guide
+# Verification Guide
 
-## Automated checks
+## Automated Suites
 
-From the repository root:
+Run all checks from the repository root:
 
 ```sh
 npm run test:controller
@@ -11,41 +11,39 @@ npm test
 git diff --check
 ```
 
-The controller script name is retained for compatibility. It now runs command, storage, artifact,
-compatibility, and focused verification tests. There is no execution controller.
+- `test:controller`: runs unit tests for plugin registration, version guards, storage, manifests, verification, and v0.1 database inspection.
+- `test:controller:native`: packs the plugin and runs isolated OpenCode services against a local scripted provider on Linux or macOS.
+- `test`: runs the browser integration suite.
+- `npm --prefix packages/prometheus run qualification:catalog`: prints the machine-readable scenario catalog (`packages/prometheus/qualification/scenarios.mjs`).
 
-Native tests start owned OpenCode services with isolated homes, databases, and configuration.
-They allow only a local scripted provider. They do not use user credentials or paid models.
-They check the packed package, native `/goal`, Linux shell execution, permissions, and fresh evaluation.
-Stop and clean up only the service and files owned by each test.
+The v0.1 campaign runner (`qualification/run.mjs`) is retired and fails closed without network or model requests.
 
-The browser integration suite remains separate. Browser instructions and profiles are not changed by this migration.
+## Required Scenarios
 
-## Evidence classes
+| ID | Scenario | Required Observation |
+| --- | --- | --- |
+| N01 | Native goal ownership | Exactly one native `/goal` exists; Prometheus never replaces or invokes it. |
+| N02 | Command admission | `/spike` and `/grill-me` preserve attachments, delivery, agent, model, and permissions. |
+| N03 | Plan restrictions | Plan sessions do not write product files or spawn Build evaluators. |
+| N04 | Linux execution | Native shell and edit tools execute without a custom process runner. |
+| N05 | Native continuation | Native `/goal` reviews and continues work after preparation commands. |
+| N06 | Independent verification | Fresh evaluator cites completed native tool results from its own session. |
+| N07 | Repair in origin | Failed or unresolved reports return to the origin without a plugin repair loop. |
+| N08 | Human control | Permission denials, cancellations, and reloads stop work without auto-restart. |
+| F01–F06 | Fault handling | Rejects changed candidates, worker claims, late reports, lost receipts, legacy runs, and denied checks. |
 
-- Unit tests establish local contracts and fault handling.
-- Scripted native tests establish integration mechanics with an exact OpenCode release.
-- Real-model observations establish whether models follow the workflow and select sufficient evidence.
-- Independent product checks establish whether a candidate meets the user's actual requirements.
+## Live-Model Qualification
 
-Do not substitute one class for another. Record the tested OpenCode version and platform.
-Do not describe a broad compatibility policy as a test matrix.
+Scripted tests prove integration mechanics, not model judgment. For live-model checks, obtain explicit approval for the model, budget, and output path, then verify:
 
-## Remaining qualification
+1. `/spike` and `/grill-me` keep model findings separate from user decisions.
+2. Plan investigations request Build rather than bypassing write restrictions.
+3. Native `/goal <objective>` completes repairs without repeated manual prompts.
+4. `prometheus_verify` rejects defective candidates and passes repaired candidates using direct tool evidence.
+5. Denied required checks report `unresolved`. Interruptions and reloads do not restart work.
 
-The old campaign runner depended on the removed controller and sandbox. It is retired.
-It rejects old manifests without contacting a service or model.
-Fixtures and independent oracle programs remain as test assets.
-See [native workflow scenarios](SCENARIOS.md) for the replacement observations.
+## Acceptance Limits
 
-Any live-model campaign needs a new approved procedure, model, resource allowance, and evidence destination.
-Do not reuse the old aggregate-budget or process-isolation claims.
-Native goal round limits are not an aggregate model-request or cost limit.
-
-## Acceptance limits
-
-Native permissions are not an OS sandbox. Candidate hashes detect changes but do not prevent them.
-The evaluator's report is a model judgment backed by references to actual tool results.
-Reference validity alone does not prove semantic correctness or full criterion coverage.
-Required excluded files and remote outcomes need separate observations.
-Missing required evidence must remain unresolved.
+- Native permissions and file hashes are not an OS sandbox.
+- Tool reference checks prove that a tool ran, not that the evaluator's reasoning is complete.
+- Excluded paths (`.git`, `.opencode`, `node_modules`, `.env*`, `.DS_Store`) and external systems require separate evidence.

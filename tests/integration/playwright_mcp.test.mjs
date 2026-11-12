@@ -1,17 +1,10 @@
-// End-to-end test for the headless Playwright MCP server. It launches real
-// headless Chromium and drives the server over newline-delimited JSON-RPC
-// against a loopback HTTP fixture. No network access and no headed window.
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-
-const repo = path.resolve(import.meta.dirname, "../..");
-const server = path.join(repo, "scripts", "opencode-playwright-mcp.mjs");
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawnMcpClient as client } from "./helpers.mjs";
 
 function fixtureServer() {
   const httpServer = http.createServer((req, res) => {
@@ -84,45 +77,6 @@ async function stateConfig(base, selector) {
     verification: typeof selector === "string" ? { selector } : selector,
   }), { mode: 0o600 });
   return root;
-}
-
-// Minimal JSON-RPC-over-stdio client for the spawned server.
-function client(env = {}) {
-  const child = spawn("node", [server], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, PROMETHEUS_CONFIG_DIR: "", ...env } });
-  const pending = new Map();
-  let nextId = 1;
-  createInterface({ input: child.stdout }).on("line", (line) => {
-    if (!line.trim()) return;
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      return;
-    }
-    if (message.id !== undefined && pending.has(message.id)) {
-      pending.get(message.id)(message);
-      pending.delete(message.id);
-    }
-  });
-  function rpc(method, params) {
-    const id = nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`rpc timeout: ${method}`)), 60000);
-      pending.set(id, (message) => {
-        clearTimeout(timer);
-        resolve(message);
-      });
-      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
-    });
-  }
-  async function call(name, args = {}) {
-    const message = await rpc("tools/call", { name, arguments: args });
-    return message.result;
-  }
-  function textOf(result) {
-    return result?.content?.map((c) => c.text).join("") ?? "";
-  }
-  return { child, rpc, call, textOf, close: () => child.stdin.end() };
 }
 
 const channels = [...new Set(["default", "chromium", process.env.PROMETHEUS_TEST_BROWSER_CHANNEL].filter(Boolean))];
