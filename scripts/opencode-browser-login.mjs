@@ -23,11 +23,20 @@ import {
   browserConfigFromEnv,
   applyAutomationCompatibility,
   applyBrowserProfile,
+  createLocalProxyRelay,
   resolveIdentityProfile,
   selectBrowserType,
   validateBrowserConfig,
   launchExternalCdpContext,
 } from "./opencode-browser-runtime.mjs";
+import {
+  bindAuthRecord,
+  BrowserSessionError,
+  issueLoginHandoff,
+  joinLoginHelper,
+  sanitizePoolProxyError,
+  verifySessionGeneration,
+} from "./opencode-browser-sessions.mjs";
 
 const OPERATION_TIMEOUT_MS = 30_000;
 
@@ -83,13 +92,39 @@ export function validateStartArgs(args) {
   }
   if (args["browser-channel"] !== undefined) throw new LoginError("use shared browser settings instead of --browser-channel");
 
+  const browser = browserConfigFromEnv({ ...process.env, PROMETHEUS_CONFIG_DIR: configDir });
+  let session;
+  let handoffId;
+  if (browser?.proxy) {
+    if (!args.session || args.session === true) {
+      throw new LoginError("--session is required when browser.proxy is configured");
+    }
+    try { assertValidName(args.session); }
+    catch (err) { throw new LoginError(err instanceof Error ? err.message : String(err)); }
+    if (args.session !== browser.proxy.session) {
+      throw new LoginError(`--session '${args.session}' must match configured proxy.session '${browser.proxy.session}'`);
+    }
+    session = args.session;
+    if (args.handoff !== undefined) {
+      if (args.handoff === true || typeof args.handoff !== "string" || !/^[0-9a-f]{32}$/.test(args.handoff)) {
+        throw new LoginError("--handoff must be a valid handoff token");
+      }
+      handoffId = args.handoff;
+    }
+  } else {
+    if (args.session !== undefined) throw new LoginError("--session requires browser.proxy configuration");
+    if (args.handoff !== undefined) throw new LoginError("--handoff requires browser.proxy configuration");
+  }
+
   return {
     configDir,
     name: args.name,
     url: args.url,
     origins,
     captureSessionStorage: Boolean(args["session-storage"]),
-    browser: browserConfigFromEnv({ ...process.env, PROMETHEUS_CONFIG_DIR: configDir }),
+    browser,
+    ...(session !== undefined ? { session } : {}),
+    ...(handoffId !== undefined ? { handoffId } : {}),
   };
 }
 
@@ -183,6 +218,24 @@ export async function loginCommand(configDir, name, action) {
 }
 
 export async function startLogin(opts, dependencies = {}) {
+  let workerOpts = opts;
+  if (opts.browser?.proxy) {
+    if (!opts.session || opts.session !== opts.browser.proxy.session) {
+      throw new LoginError("proxied login requires --session matching configured proxy.session");
+    }
+    if (!opts.handoffId) {
+      try {
+        const issued = await (dependencies.issueLoginHandoff || issueLoginHandoff)(
+          opts.configDir,
+          opts.browser,
+          { session: opts.session }
+        );
+        workerOpts = { ...opts, handoffId: issued.handoffId };
+      } catch (error) {
+        throw new LoginError(sanitizePoolProxyError(error, opts.browser));
+      }
+    }
+  }
   const socketPath = loginSocket(opts.configDir, opts.name);
   const existing = fs.lstatSync(socketPath, { throwIfNoEntry: false });
   if ((await loginCommand(opts.configDir, opts.name, "pending")).status !== "not-running") {
@@ -206,8 +259,8 @@ export async function startLogin(opts, dependencies = {}) {
     };
     child.once("error", () => finish(new LoginError("login worker could not start")));
     child.once("exit", () => finish(new LoginError("login worker exited before opening a window")));
-    child.once("message", result => finish(result.error ? new LoginError(result.error) : null, result));
-    child.send(opts);
+    child.once("message", result => finish(result.error ? new LoginError(sanitizePoolProxyError(result.error, opts.browser)) : null, result));
+    child.send(workerOpts);
   });
 }
 
@@ -227,6 +280,7 @@ export async function captureConfirmedState(context, opts) {
 export function loginBrowserConfig(config) {
   const selected = validateBrowserConfig(config);
   if (selected.executionMode === "external-cdp") return selected;
+  if (selected.proxy) return selected;
   if (selected.channel !== "msedge" && !selected.profile && !selected.identityProfile &&
       selected.executionMode !== "virtual-display" &&
       !Object.keys(selected.contextOptions ?? {}).length &&
@@ -237,9 +291,7 @@ export function loginBrowserConfig(config) {
 }
 
 export async function serveLogin(opts, dependencies = {}) {
-  opts = { ...opts, browser: loginBrowserConfig(opts.browser) };
-  const socketPath = loginSocket(opts.configDir, opts.name);
-  let context, cdpBrowser, loginPage, profileDir, closing, busy = false, listening = false, ready = false;
+  let context, cdpBrowser, loginPage, profileDir, closing, helperLease = null, proxyRelay = null, busy = false, listening = false, ready = false;
   const closeBrowser = async () => {
     if (cdpBrowser) {
       await loginPage?.close().catch(() => {});
@@ -250,6 +302,10 @@ export async function serveLogin(opts, dependencies = {}) {
   const cleanup = () => closing ||= (async () => {
     if (listening) server.close();
     await closeBrowser();
+    if (proxyRelay) await proxyRelay.close().catch(() => {});
+    if (helperLease) {
+      try { helperLease.release(); } catch {}
+    }
     if (profileDir) fs.rmSync(profileDir, { recursive: true, force: true });
     process.removeListener("SIGINT", interrupt); process.removeListener("SIGTERM", interrupt);
     process.removeListener("disconnect", disconnected);
@@ -259,6 +315,22 @@ export async function serveLogin(opts, dependencies = {}) {
   process.once("SIGINT", interrupt); process.once("SIGTERM", interrupt);
   process.once("disconnect", disconnected);
   try {
+    opts = { ...opts, browser: loginBrowserConfig(opts.browser) };
+    const socketPath = loginSocket(opts.configDir, opts.name);
+    if (opts.browser.proxy) {
+      if (!opts.session || !opts.handoffId) {
+        throw new LoginError("proxied login requires session and handoff capability");
+      }
+      helperLease = await (dependencies.joinLoginHelper || joinLoginHelper)(
+        opts.configDir,
+        opts.browser,
+        { session: opts.session, handoffId: opts.handoffId }
+      );
+      proxyRelay = await (dependencies.createLocalProxyRelay || createLocalProxyRelay)({
+        server: helperLease.server,
+        credentials: helperLease.credentials,
+      });
+    }
     await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
     listening = true;
     fs.chmodSync(socketPath, 0o600);
@@ -281,12 +353,32 @@ export async function serveLogin(opts, dependencies = {}) {
         try {
           if (action === "complete") {
             const captured = await beforeDeadline(() => captureConfirmedState(context, opts), Date.now() + OPERATION_TIMEOUT_MS);
+            if (opts.browser.proxy && helperLease) {
+              (dependencies.verifySessionGeneration || verifySessionGeneration)(
+                opts.configDir,
+                opts.browser,
+                helperLease.generation
+              );
+            }
             saveState({ configDir: opts.configDir, name: opts.name, origins: opts.origins, ...captured, verification: { method: "user-confirmed" } });
+            if (opts.browser.proxy && helperLease) {
+              await (dependencies.bindAuthRecord || bindAuthRecord)(
+                opts.configDir,
+                opts.session,
+                opts.name,
+                { expectedGeneration: helperLease.generation }
+              );
+            }
           }
           await cleanup();
           socket.end(JSON.stringify({ status: action === "complete" ? "saved" : "cancelled", name: opts.name, ...(action === "complete" ? { authentication: "unverified" } : {}) }));
         } catch (error) {
-          socket.end(JSON.stringify({ error: error instanceof LoginError ? error.message : "login operation failed; inspect pending status and saved-state metadata before retrying" }));
+          const safeMsg = sanitizePoolProxyError(error, opts.browser, helperLease?.credentials);
+          socket.end(JSON.stringify({
+            error: error instanceof LoginError || error instanceof BrowserSessionError
+              ? safeMsg
+              : "login operation failed; inspect pending status and saved-state metadata before retrying",
+          }));
           busy = false;
         }
       });
@@ -303,11 +395,22 @@ export async function serveLogin(opts, dependencies = {}) {
       if (opts.browser.automationCompatibility === undefined && browserType === chromium) {
         opts.browser = { ...opts.browser, automationCompatibility: true };
       }
+      if (opts.browser.proxy && helperLease) {
+        (dependencies.verifySessionGeneration || verifySessionGeneration)(
+          opts.configDir,
+          opts.browser,
+          helperLease.generation
+        );
+      }
       profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "prometheus-login-"));
       const profile = resolveIdentityProfile(opts.browser || {});
       const contextOpts = browserContextOptions(opts.browser);
       if (profile?.userAgent && !contextOpts.userAgent) contextOpts.userAgent = profile.userAgent;
-      context = await browserType.launchPersistentContext(profileDir, { ...browserLaunchOptions(opts.browser, false), ...contextOpts });
+      context = await browserType.launchPersistentContext(profileDir, {
+        ...browserLaunchOptions(opts.browser, false),
+        ...(proxyRelay ? { proxy: { server: proxyRelay.url } } : {}),
+        ...contextOpts,
+      });
       if (opts.browser?.automationCompatibility) await applyAutomationCompatibility(context);
       if (profile) await applyBrowserProfile(context, profile);
     }
@@ -315,12 +418,28 @@ export async function serveLogin(opts, dependencies = {}) {
     context.once("close", () => { void cleanup(); });
     loginPage = cdpBrowser ? await context.newPage() : context.pages()[0] ?? await context.newPage();
     if (closing) { await closeBrowser(); return; }
-    await loginPage.goto(opts.url, { waitUntil: "domcontentloaded", timeout: OPERATION_TIMEOUT_MS });
+    proxyRelay?.clearLastFailure();
+    const loginResp = await loginPage.goto(opts.url, { waitUntil: "domcontentloaded", timeout: OPERATION_TIMEOUT_MS });
+    const relayFailure = proxyRelay?.getLastFailure();
+    if (loginResp?.status() === 407 || relayFailure?.kind === "proxy_auth") {
+      throw new LoginError("proxy authentication failed (HTTP 407); do not retry automatically or fall back to direct connection");
+    }
+    if (relayFailure?.kind === "proxy_connection") {
+      throw new LoginError(`proxy connection failed (${relayFailure.code}); do not retry automatically or fall back to direct connection`);
+    }
     ready = true;
     if (process.connected) process.send({ status: "awaiting-user", name: opts.name });
-  } catch {
+  } catch (error) {
+    const relayFailure = proxyRelay?.getLastFailure();
+    const message = relayFailure?.kind === "proxy_auth"
+      ? "proxy authentication failed (HTTP 407); do not retry automatically or fall back to direct connection"
+      : relayFailure?.kind === "proxy_connection"
+        ? `proxy connection failed (${relayFailure.code}); do not retry automatically or fall back to direct connection`
+        : error instanceof LoginError || error instanceof BrowserSessionError
+          ? sanitizePoolProxyError(error, opts.browser, helperLease?.credentials)
+          : "login window could not open; check graphical session and browser installation";
     await cleanup();
-    if (process.connected) process.send({ error: "login window could not open; check graphical session and browser installation" }, () => { if (process.connected) process.disconnect(); });
+    if (process.connected) process.send({ error: message }, () => { if (process.connected) process.disconnect(); });
   }
 }
 

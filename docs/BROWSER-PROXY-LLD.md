@@ -1,6 +1,6 @@
 # Browser Proxy Pool: Low-Level Design
 
-**Status:** Proposed; not implemented.
+**Status:** Implemented (`scripts/opencode-browser-sessions.mjs`, `scripts/browser-sessions.mjs`, `npm run browser:sessions`).
 
 **Requirements:** [Browser Proxy Pool Specification](BROWSER-PROXY-SPEC.md). This document proposes implementation details; the specification controls in case of conflict.
 
@@ -83,12 +83,17 @@ The ownership mechanism must account for an active login helper if its task owne
 Add a dedicated CLI and package entry, with final flag syntax documented before release. Intended operations:
 
 ```sh
-npm run browser:sessions -- create shopping
+npm run browser:sessions -- create [shopping]
 npm run browser:sessions -- list
-npm run browser:sessions -- show shopping
-npm run browser:sessions -- bind-auth shopping store-login
-npm run browser:sessions -- rotate shopping
+npm run browser:sessions -- show [shopping]
+npm run browser:sessions -- bind-auth [shopping] <auth-record>
+npm run browser:sessions -- unbind-auth [shopping] <auth-record>
+npm run browser:sessions -- rotate [shopping] [--retain-associations]
+npm run browser:sessions -- reconcile-cursor <proxy-id>
+npm run browser:sessions -- reconcile-session [shopping] [proxy-id] [--retain-associations]
 ```
+
+(Each command also accepts explicit `--session <name>`, `--name <auth-record>`, `--proxy-id <id>`, and `--config-dir <dir>` flags.)
 
 Create reserves a proxy under the registry lock. Show/list are read-only and sanitized. Bind verifies that the existing authentication record exists and changes only associations, not saved state. Rotate requires an inactive session, atomically allocates the next proxy, increments generation, and clears authentication associations by default. Provide an explicit retain-associations option with a warning. Configuration chooses the session; an in-flight browser does not change session when configuration changes.
 

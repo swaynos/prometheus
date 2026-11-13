@@ -8,9 +8,10 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { parse, modify, applyEdits } from 'jsonc-parser';
 import { browserConfigFromEnv, validateBrowserConfig } from './opencode-browser-runtime.mjs';
+import { hasActiveSessionOwners } from './opencode-browser-sessions.mjs';
 
 const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const files = ['state', 'runtime', 'service', 'login', 'humanize'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs', 'browser-profiles.mjs');
+const files = ['state', 'runtime', 'service', 'login', 'humanize', 'sessions'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs', 'browser-profiles.mjs', 'browser-sessions.mjs');
 const inventory = [...files, 'rules/resource-selection.md', 'docs/RESOURCE-SELECTION.md', 'docs/BROWSER-OPERATIONS.md', 'package.json', 'package-lock.json'];
 const historical = new Set([...inventory, 'docs/BROWSER-MIGRATION.md']);
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -191,7 +192,8 @@ function verifyRuntime(stage, config, environment) {
     if (!regular(manifest) || JSON.parse(fs.readFileSync(manifest, 'utf8')).version !== version) throw new Error('Installed browser dependencies are missing or changed; inspect and remove/reinstall the owned profile');
   }
   const probe = path.join(stage, '.verify.mjs');
-  fs.writeFileSync(probe, `import { chromium } from 'playwright';\nimport { enterTaskDisplay } from './opencode-browser-service.mjs';\nimport { createTaskContext } from './opencode-browser-runtime.mjs';\nconst config = ${JSON.stringify(config)};\nawait enterTaskDisplay(config);\nconst { browser, context } = await createTaskContext(chromium, config);\ntry { await (await context.newPage()).goto('about:blank'); } finally { await browser.close(); }\n`, { mode: 0o600, flag: 'wx' });
+  const { proxy: _omittedProxy, ...probeConfig } = config || {};
+  fs.writeFileSync(probe, `import { chromium } from 'playwright';\nimport { enterTaskDisplay } from './opencode-browser-service.mjs';\nimport { createTaskContext } from './opencode-browser-runtime.mjs';\nconst config = ${JSON.stringify(probeConfig)};\nawait enterTaskDisplay(config);\nconst { browser, context } = await createTaskContext(chromium, config);\ntry { await (await context.newPage()).goto('about:blank'); } finally { await browser.close(); }\n`, { mode: 0o600, flag: 'wx' });
   try { execFileSync(process.execPath, [probe], { env: { ...process.env, ...environment, PROMETHEUS_VIRTUAL_DISPLAY: '' }, stdio: 'pipe', timeout: 30000 }); }
   catch { throw new Error('Browser readiness check failed; install the selected Playwright browser (and xvfb/xauth for Linux virtual-display), then retry. No cutover was published.'); }
   finally { fs.unlinkSync(probe); }
@@ -274,6 +276,9 @@ export function profile(operation, { root, migrate = false, quiescent = false, p
       safeRoot(directory);
       if (stat(directory) && fs.readdirSync(directory).length) throw new Error('Login coordination records exist; inspect and finish/cancel handoffs first');
     }
+    if (hasActiveSessionOwners(root)) {
+      throw new Error('Active proxy session owners or login helpers exist; close them before migrating or removing');
+    }
     if (regular(pendingFile)) {
       if (operation === 'rollback') return recover(pendingFile, receiptFile, root, runtime);
       throw new Error('Interrupted migration exists; inspect status and use rollback --quiescent before retrying');
@@ -314,6 +319,9 @@ export function profile(operation, { root, migrate = false, quiescent = false, p
     if (!receipt && (config.value.commands?.browser || ['commands/browser.md', 'command/browser.md'].some(name => stat(path.join(root, name))))) throw new Error('Existing /browser command requires manual reconciliation');
     if (!receipt && stat(runtime)) throw new Error('Unowned runtime directory exists');
     privateDirectory(path.join(root, 'prometheus-sessions'));
+    for (const optionalPrivateDir of ['prometheus-proxy-sessions', 'prometheus-proxy-secrets']) {
+      if (stat(path.join(root, optionalPrivateDir))) privateDirectory(path.join(root, optionalPrivateDir));
+    }
     const plans = [];
     const add = (file, data, userData = false) => {
       safeRoot(path.dirname(file));

@@ -9,6 +9,7 @@ import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { loadStateForOrigin, listStates } from "./opencode-browser-state.mjs";
 import { browserConfigFromEnv, browserLaunchOptions, browserRuntimeInfo, createTaskContext, hydrateBrowserState } from "./opencode-browser-runtime.mjs";
+import { getSessionAuthRecords, sanitizePoolProxyError } from "./opencode-browser-sessions.mjs";
 import { enterTaskDisplay } from "./opencode-browser-service.mjs";
 import { humanClick, humanType, applyNavigationDelay } from "./opencode-browser-humanize.mjs";
 
@@ -102,6 +103,8 @@ let chromium = null;
 let browser = null;
 let context = null;
 let resolvedRuntime = null;
+let proxySession = null;
+let proxyRelay = null;
 let pages = [];
 let activeIndex = 0;
 const consoleMessages = [];
@@ -135,14 +138,22 @@ function registerPage(page) {
   page.on("framedetached", frame => { invalidateFrame(frame); frameIds.delete(frame); });
   page.on("close", () => { for (const frame of page.frames()) { invalidateFrame(frame); frameIds.delete(frame); } });
   page.on("console", (msg) => {
-    if (consoleMessages.length < 500) consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
+    if (consoleMessages.length < 500) {
+      consoleMessages.push(sanitizePoolProxyError(`[${msg.type()}] ${msg.text()}`, TASK_CONFIG));
+    }
   });
 }
 
 async function ensureContext() {
   if (context) return context;
   if (!chromium) ({ chromium } = await import("playwright"));
-  ({ browser, context, runtime: resolvedRuntime } = await createTaskContext(chromium, TASK_CONFIG));
+  ({
+    browser,
+    context,
+    runtime: resolvedRuntime,
+    proxySession = null,
+    proxyRelay = null,
+  } = await createTaskContext(chromium, TASK_CONFIG, undefined, { configDir: CONFIG_DIR }));
   context.setDefaultTimeout(DEFAULT_TIMEOUT);
   pages = [];
   context.on("page", registerPage);
@@ -171,6 +182,9 @@ async function closeBrowser() {
   const toClose = browser;
   browser = null;
   context = null;
+  resolvedRuntime = null;
+  proxySession = null;
+  proxyRelay = null;
   pages = [];
   activeIndex = 0;
   hydratedOrigins.clear();
@@ -183,6 +197,16 @@ async function closeBrowser() {
 
 function candidateStateNames() {
   if (!CONFIG_DIR) return [];
+  if (TASK_CONFIG.proxy) {
+    let record;
+    try { record = getSessionAuthRecords(CONFIG_DIR, TASK_CONFIG.proxy.session); } catch { return []; }
+    const allowed = record && (!proxySession || record.generation === proxySession.generation)
+      ? record.authRecords
+      : [];
+    if (!STATE_NAMES.length) return allowed;
+    const allowedSet = new Set(allowed);
+    return STATE_NAMES.filter((name) => allowedSet.has(name));
+  }
   if (STATE_NAMES.length) return STATE_NAMES;
   try { return listStates(CONFIG_DIR).map((m) => m.name); } catch { return []; }
 }
@@ -418,6 +442,15 @@ async function observeChange(page, frame, expect, timeout, signal, action) {
     }
     while (Date.now() - started < timeout && !signal?.aborted) {
       if (page.isClosed() || frame.isDetached()) return { status: action ? "unknown" : "unresolved", reason: "target_closed" };
+      const proxyFailure = proxyRelay?.getLastFailure();
+      if (proxyFailure) {
+        return {
+          status: action && dispatched ? "unknown" : "unresolved",
+          reason: proxyFailure.kind,
+          message: proxyFailure.message,
+          ...(action ? { diagnostic: "proxy failure after action dispatch; inspect the page before retrying manually" } : {}),
+        };
+      }
       if (denial) return { status: "access_denied", evidence: denial };
       if (navigationStatus !== null) {
         const classification = await navigationClassification(page, navigationStatus, Math.max(1, timeout - (Date.now() - started)));
@@ -518,16 +551,52 @@ async function validateAndWrite({ args, destination, bytes, contentType }) {
   return { sha256, bytes: bytes.length };
 }
 
+function classifyProxyError(error, status = null) {
+  const relayFailure = proxyRelay?.getLastFailure();
+  if (relayFailure?.kind === "proxy_auth" || status === 407) {
+    return new Error("proxy authentication failed (HTTP 407); do not retry automatically or fall back to direct connection");
+  }
+  if (relayFailure?.kind === "proxy_connection") {
+    return new Error(`proxy connection failed (${relayFailure.code}); do not retry automatically or fall back to direct connection`);
+  }
+  const sanitized = sanitizePoolProxyError(error, TASK_CONFIG);
+  if (/ERR_PROXY_AUTH_UNSUPPORTED|proxy authentication/i.test(sanitized)) {
+    return new Error("proxy authentication failed (HTTP 407); do not retry automatically or fall back to direct connection");
+  }
+  if (/ERR_PROXY_CONNECTION_FAILED|ERR_TUNNEL_CONNECTION_FAILED/i.test(sanitized)) {
+    return new Error("proxy connection failed; do not retry automatically or fall back to direct connection");
+  }
+  if (/ERR_INVALID_AUTH_CREDENTIALS/i.test(sanitized)) {
+    return new Error("access denied: destination requires HTTP authentication");
+  }
+  return new Error(sanitized || "browser operation failed");
+}
+
 const HANDLERS = {
   async browser_status() {
     const page = pages[activeIndex];
     const pageOpen = Boolean(page && !page.isClosed());
     let origin = null;
     if (pageOpen) { try { origin = new URL(page.url()).origin; } catch {} }
+    let proxyStatus = { enabled: false };
+    if (TASK_CONFIG.proxy) {
+      let currentView = null;
+      if (!proxySession && CONFIG_DIR) {
+        try { currentView = getSessionAuthRecords(CONFIG_DIR, TASK_CONFIG.proxy.session); } catch {}
+      }
+      proxyStatus = {
+        enabled: true,
+        session: proxySession?.session ?? TASK_CONFIG.proxy.session,
+        generation: proxySession?.generation ?? currentView?.generation ?? null,
+        proxyId: proxySession?.proxyId ?? currentView?.proxyId ?? null,
+        routing: "configured",
+      };
+    }
     return text({
       runtime: SERVER_INFO.name,
       version: SERVER_INFO.version,
       ...(context && resolvedRuntime ? resolvedRuntime : browserRuntimeInfo(TASK_CONFIG)),
+      proxy: proxyStatus,
       mode: TASK_CONFIG.executionMode || "headless",
       virtualDisplay: TASK_CONFIG.executionMode === "virtual-display" ? process.env.DISPLAY : null,
       launchOptions: browserLaunchOptions(TASK_CONFIG),
@@ -554,10 +623,14 @@ const HANDLERS = {
     const remaining = () => Math.max(1, budget - (Date.now() - started));
     const resp = await page.goto(args.url, { waitUntil, timeout: budget });
     const status = resp ? resp.status() : null;
+    if (status === 407 || proxyRelay?.getLastFailure()) {
+      throw classifyProxyError(new Error("proxy failure"), status);
+    }
     let classification = await navigationClassification(page, status, remaining());
     if (!classification && args.ready_selector !== undefined) {
       try { await page.locator(args.ready_selector).first().waitFor({ state: "visible", timeout: remaining() }); }
       catch (error) {
+        if (proxyRelay?.getLastFailure()) throw classifyProxyError(error, status);
         classification = await navigationClassification(page, status, remaining());
         if (!classification) {
           if (error?.name !== "TimeoutError") throw error;
@@ -587,6 +660,9 @@ const HANDLERS = {
     await page.waitForLoadState("networkidle", { timeout: Math.min(2000, remaining()) }).catch(() => {});
     const resp = await page.reload({ waitUntil, timeout: remaining() });
     const status = resp ? resp.status() : null;
+    if (status === 407 || proxyRelay?.getLastFailure()) {
+      throw classifyProxyError(new Error("proxy failure"), status);
+    }
     const classification = await navigationClassification(page, status, remaining());
     return text(`reloaded ${page.url()} (status ${status ?? "n/a"}${classification})`);
   },
@@ -1045,8 +1121,16 @@ async function handle(message) {
     if (!TOOL_NAMES.has(name)) return replyError(id, `unknown tool: ${name}`);
     const controller = new AbortController();
     activeRequest = { id, controller, signal: controller.signal };
-    try { reply(id, await HANDLERS[name](args)); }
-    catch (err) { replyError(id, `${name} failed: ${err instanceof Error ? err.message : String(err)}`); }
+    if (name !== "browser_status" && name !== "browser_close") proxyRelay?.clearLastFailure();
+    try {
+      const result = await HANDLERS[name](args);
+      if (name !== "browser_status" && name !== "browser_close" && proxyRelay?.getLastFailure()) {
+        throw classifyProxyError(new Error("proxy failure"));
+      }
+      reply(id, result);
+    } catch (err) {
+      replyError(id, `${name} failed: ${classifyProxyError(err).message}`);
+    }
     finally { if (activeRequest?.id === id) activeRequest = null; }
     return;
   }
@@ -1064,7 +1148,8 @@ reader.on("line", (line) => {
     return;
   }
   queue = queue.then(() => handle(message)).catch((err) => {
-    process.stderr.write(`prometheus-browser: handler error: ${err instanceof Error ? err.stack : String(err)}\n`);
+    const safe = sanitizePoolProxyError(err instanceof Error ? err.stack : String(err), TASK_CONFIG);
+    process.stderr.write(`prometheus-browser: handler error: ${safe}\n`);
   });
 });
 reader.on("close", () => { queue = queue.then(() => closeBrowser()).finally(() => process.exit(0)); });

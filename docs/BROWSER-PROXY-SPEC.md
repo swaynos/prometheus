@@ -1,6 +1,6 @@
 # Browser Proxy Pool Specification
 
-**Status:** Proposed; not implemented.
+**Status:** Implemented (macOS Playwright Chromium and installed Google Chrome qualified locally; Linux headless and Xvfb virtual-display remain unverified pending Linux host execution).
 
 **Associated design:** [Browser Proxy Low-Level Design](BROWSER-PROXY-LLD.md).
 

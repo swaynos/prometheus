@@ -20,6 +20,7 @@ The MCP server and login helper read `<config_dir>/prometheus-browser.json` (whi
 | `launchOptions` | `{ chromiumSandbox?: boolean, slowMo?: 0..1000, timeout?: 1..120000 }` | Explicit browser startup options. |
 | `contextOptions` | `{ viewport, screen, deviceScaleFactor, locale, timezoneId, colorScheme, reducedMotion, userAgent }` | Viewport/screen `1..16384` px; scale `(0, 8]`. `screen` and `deviceScaleFactor` require a fixed `viewport`. |
 | `cdpOptions` | `{ port?: 0..65535, endpoint?: string, userDataDir?: string, timeout?: 1..120000 }` | Loopback remote debugging options for `external-cdp`. |
+| `proxy` | `{ session, strategy: "round-robin", pool: [{ id, server, credentialsFile? }] }` | Managed Chromium modes only (rejects `external-cdp` and non-Chromium profiles). `server` must be `http://host:port`; optional `credentialsFile` is a relative mode-`0600` JSON file under `0700` dirs inside `<config_dir>`. |
 
 Do not change settings or switch modes to retry an access denial.
 
@@ -77,12 +78,13 @@ node "$HOME/.config/opencode/prometheus-browser/opencode-browser-login.mjs" comp
 
 5. Verify task access in a fresh task browser context. Do not complete the task in the login window.
 
-- **CDP Login:** Ordinary `default`, `chromium`, and `chrome` logins on macOS and Linux use CDP when no profile, custom launch/context options, or virtual display is configured. With `cdpOptions.endpoint`, the helper opens and closes only its own tab in a dedicated automation browser.
-- **Saved State:** Stored as mode-0600 JSON files under `<config_dir>/prometheus-sessions/<name>.json`, scoped to approved HTTPS origins. Capture reads cookies and `localStorage` (plus `--session-storage` when requested) from existing approved-origin tabs without calling `context.storageState()`.
-- **Privacy:** State values never enter model context, logs, screenshots, or tool output. `browser_evaluate` is disabled while saved state is loaded.
+- **CDP Login:** Ordinary `default`, `chromium`, and `chrome` logins on macOS and Linux use CDP when no profile, custom launch/context options, virtual display, or `proxy` is configured. Proxied logins always use a managed persistent context bound to `--session <name>` (matching `proxy.session`) and a short-lived signed handoff capability.
+- **Session Pinning & Hydration:** When `proxy` is configured, each named session is pinned in `<config_dir>/prometheus-proxy-sessions/registry.json` to one pool proxy ID and generation, MCP hydration restricts candidates to that generation's bound `authRecords`, and rotation refuses to proceed while a task owner or login helper is active. Manage sessions explicitly with `npm run browser:sessions -- create|list|show|bind-auth|unbind-auth|rotate|reconcile-cursor|reconcile-session`. Note that pinning configures one stable pool endpoint and local routing configuration, not proof of external exit IP (upstream proxy providers may rotate exit IPs or expire sticky sessions independently), and initial support covers Chromium-engine managed modes only (not OS-wide DNS/WebRTC blocking).
+- **Saved State:** Stored as mode-0600 JSON files under `<config_dir>/prometheus-sessions/<name>.json`, scoped to approved HTTPS origins. Capture reads cookies and `localStorage` (plus `--session-storage` when requested) from existing approved-origin tabs without calling `context.storageState()`. For proxied sessions, capture binds the saved state name to the active session generation only after capture succeeds.
+- **Privacy:** State values never enter model context, logs, screenshots, `browser_status`, or tool output; nor do proxy URLs, proxy credentials, or credential file paths. `browser_evaluate` is disabled while saved state is loaded.
 
 ## 5. File Transfers and Failure Handling
 
 - **Uploads (`browser_upload_image`):** Pass an absolute `path` and a visible file input or chooser button `ref`/`selector`. Accepts nonempty regular PNG, JPEG, WebP, or GIF files ($\le 20\text{ MiB}$) outside `<config_dir>`. Verify page attachment state before submitting.
 - **Downloads (`browser_download`, `browser_save_media`):** Confirm the output belongs to the current request. Save to a new path and verify nonzero bytes, MIME type, `signature_hex`, or `expected_sha256`. A page preview is not a delivered file, and an existing image is not success.
-- **Interruptions and Denial:** Treat HTTP 401/403 and Cloudflare challenges as access denial and report a blocker. Record intent before non-idempotent actions. If an action is interrupted, mark the outcome unknown, inspect the page, and never repeat an unknown action automatically.
+- **Interruptions and Denial:** Treat target HTTP 401/403 and Cloudflare challenges as access denial, and treat proxy connection errors or HTTP 407 responses as explicit proxy failures without falling back to a direct connection, rotating proxies automatically, or retrying automatically. Record intent before non-idempotent actions. If an action is interrupted, mark the outcome unknown, inspect the page, and never repeat an unknown action automatically.

@@ -1,4 +1,12 @@
 import fs from "node:fs";
+import http from "node:http";
+import {
+  acquireTaskSession,
+  BrowserSessionError,
+  sanitizePoolProxyError,
+  validateProxyConfig,
+  verifySessionGeneration,
+} from "./opencode-browser-sessions.mjs";
 import path from "node:path";
 import os from "node:os";
 import net from "node:net";
@@ -90,7 +98,7 @@ function validateCdpOptions(value) {
 
 export function validateBrowserConfig(config) {
   if (!config || typeof config !== "object" || Array.isArray(config) ||
-      Object.keys(config).some((key) => !["channel", "profile", "automationCompatibility", "executionMode", "launchOptions", "contextOptions", "cdpOptions", "identityProfile", "humanize"].includes(key)) ||
+      Object.keys(config).some((key) => !["channel", "profile", "automationCompatibility", "executionMode", "launchOptions", "contextOptions", "cdpOptions", "identityProfile", "humanize", "proxy"].includes(key)) ||
       !["default", "chromium", "chrome", "msedge"].includes(config.channel)) {
     throw new Error("browser must specify channel: default, chromium, chrome, or msedge");
   }
@@ -123,6 +131,21 @@ export function validateBrowserConfig(config) {
     if (Object.keys(config.contextOptions ?? {}).some(key => key in profile.contextOptions)) throw new Error("profile display settings cannot be overridden; select a different profile");
   }
   if (config.identityProfile && mode === "external-cdp") throw new Error("identity profiles are not supported with external-cdp");
+  const launchOptions = config.launchOptions !== undefined ? validateLaunchOptions(config.launchOptions) : undefined;
+  let proxy;
+  if (config.proxy !== undefined) {
+    if (mode === "external-cdp") throw new Error("proxy is not supported with external-cdp");
+    if (profile && profile.engine !== "chromium") {
+      throw new Error("proxy is only supported with chromium-engine browsers");
+    }
+    if (
+      Array.isArray(launchOptions?.args) &&
+      launchOptions.args.some((arg) => /^--(proxy-server|proxy-bypass-list|proxy-pac-url|no-proxy-server)(=|$)/i.test(String(arg)))
+    ) {
+      throw new Error("proxy cannot be combined with proxy launchOptions.args flags");
+    }
+    proxy = validateProxyConfig(config.proxy);
+  }
   return {
     channel: config.channel,
     ...(config.automationCompatibility !== undefined ? { automationCompatibility: config.automationCompatibility } : {}),
@@ -130,9 +153,10 @@ export function validateBrowserConfig(config) {
     ...(config.profile !== undefined ? { profile: profile.id } : {}),
     ...(config.identityProfile !== undefined ? { identityProfile: config.identityProfile } : {}),
     ...(mode === "virtual-display" || mode === "external-cdp" ? { executionMode: mode } : {}),
-    ...(config.launchOptions !== undefined ? { launchOptions: validateLaunchOptions(config.launchOptions) } : {}),
+    ...(launchOptions !== undefined ? { launchOptions } : {}),
     ...(config.contextOptions !== undefined ? { contextOptions: validateContextOptions(config.contextOptions) } : {}),
     ...(config.cdpOptions !== undefined ? { cdpOptions: validateCdpOptions(config.cdpOptions) } : {}),
+    ...(proxy !== undefined ? { proxy } : {}),
   };
 }
 
@@ -289,6 +313,7 @@ export function browserRuntimeInfo(config) {
       : selected.channel === "chromium" || selected.executionMode === "virtual-display" ? "chromium" : "chromium-headless-shell",
     contextOptions: browserContextOptions(selected),
     ...(selected.executionMode ? { executionMode: selected.executionMode } : {}),
+    ...(selected.proxy ? { proxy: { enabled: true, session: selected.proxy.session, routing: "configured" } } : {}),
   };
 }
 
@@ -459,7 +484,240 @@ export async function launchExternalCdpContext(chromium, selected, options = {})
   }
 }
 
-export async function createTaskContext(chromium, config, engines) {
+export async function createLocalProxyRelay({ server: upstreamServer, credentials = null }) {
+  const upstreamUrl = new URL(upstreamServer);
+  const upstreamHost = upstreamUrl.hostname.replace(/^\[(.*)\]$/, "$1");
+  const upstreamPort = Number(upstreamUrl.port || 80);
+  const authHeader = credentials
+    ? `Basic ${Buffer.from(`${credentials.username}:${credentials.password}`, "utf8").toString("base64")}`
+    : null;
+
+  let lastFailure = null;
+  let closed = false;
+  const activeSockets = new Set();
+
+  const trackSocket = (socket) => {
+    activeSockets.add(socket);
+    socket.once("close", () => activeSockets.delete(socket));
+    socket.on("error", () => {});
+  };
+
+  const relayServer = http.createServer((req, res) => {
+    trackSocket(req.socket);
+    const headers = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      const lower = k.toLowerCase();
+      if (lower === "proxy-connection" || lower === "proxy-authorization" || lower === "connection") continue;
+      headers[k] = v;
+    }
+    if (authHeader) {
+      headers["proxy-authorization"] = authHeader;
+    }
+    headers["connection"] = "close";
+
+    let responded = false;
+    const upReq = http.request(
+      {
+        host: upstreamHost,
+        port: upstreamPort,
+        method: req.method,
+        path: req.url,
+        headers,
+        agent: false,
+      },
+      (upRes) => {
+        responded = true;
+        const status = upRes.statusCode || 502;
+        if (status === 407) {
+          lastFailure = {
+            kind: "proxy_auth",
+            status: 407,
+            phase: "http",
+            message: "proxy authentication failed (HTTP 407)",
+          };
+        }
+        const resHeaders = {};
+        for (const [k, v] of Object.entries(upRes.headers)) {
+          const lower = k.toLowerCase();
+          if (status === 407 && (lower === "proxy-authenticate" || lower === "proxy-authentication-info")) {
+            continue;
+          }
+          resHeaders[k] = v;
+        }
+        res.writeHead(status, upRes.statusMessage, resHeaders);
+        upRes.pipe(res);
+      }
+    );
+
+    upReq.on("socket", (sock) => trackSocket(sock));
+    upReq.on("error", (err) => {
+      if (!responded) {
+        lastFailure = {
+          kind: "proxy_connection",
+          code: err?.code || "PROXY_CONNECTION_FAILED",
+          phase: "http",
+          message: "proxy connection failed",
+        };
+      }
+      if (!res.headersSent) {
+        if (!req.socket.destroyed) req.socket.destroy();
+      } else if (!res.destroyed) {
+        res.destroy();
+      }
+    });
+
+    req.on("aborted", () => upReq.destroy());
+    req.pipe(upReq);
+  });
+
+  relayServer.on("connect", (req, clientSocket, head) => {
+    trackSocket(clientSocket);
+    const target = req.url;
+    if (!target || /[\r\n]/.test(target)) {
+      if (!clientSocket.destroyed) clientSocket.destroy();
+      return;
+    }
+
+    const upSocket = net.connect({ host: upstreamHost, port: upstreamPort });
+    trackSocket(upSocket);
+    let tunnelEstablished = false;
+    let headerBuf = Buffer.alloc(0);
+
+    const failConnect = (failure) => {
+      if (failure && !lastFailure) lastFailure = failure;
+      if (!upSocket.destroyed) upSocket.destroy();
+      if (!clientSocket.destroyed) clientSocket.destroy();
+    };
+
+    upSocket.on("connect", () => {
+      const lines = [
+        `CONNECT ${target} HTTP/1.1`,
+        `Host: ${target}`,
+        "Proxy-Connection: keep-alive",
+      ];
+      if (authHeader) lines.push(`Proxy-Authorization: ${authHeader}`);
+      upSocket.write(lines.join("\r\n") + "\r\n\r\n");
+    });
+
+    const onUpData = (chunk) => {
+      if (tunnelEstablished) return;
+      headerBuf = Buffer.concat([headerBuf, chunk]);
+      if (headerBuf.length > 32 * 1024) {
+        failConnect({
+          kind: "proxy_connection",
+          code: "HEADER_OVERFLOW",
+          phase: "connect",
+          message: "proxy CONNECT response too large",
+        });
+        return;
+      }
+      const hdrEnd = headerBuf.indexOf("\r\n\r\n");
+      if (hdrEnd === -1) return;
+
+      upSocket.off("data", onUpData);
+      const headText = headerBuf.subarray(0, hdrEnd).toString("latin1");
+      const statusMatch = headText.match(/^HTTP\/\d+\.\d+\s+(\d{3})/);
+      const status = statusMatch ? Number(statusMatch[1]) : 502;
+
+      if (status === 200) {
+        tunnelEstablished = true;
+        if (!clientSocket.destroyed) {
+          clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+          const remainder = headerBuf.subarray(hdrEnd + 4);
+          if (remainder.length > 0) clientSocket.write(remainder);
+          if (head && head.length > 0) upSocket.write(head);
+          clientSocket.pipe(upSocket);
+          upSocket.pipe(clientSocket);
+        }
+        clientSocket.once("close", () => {
+          if (!upSocket.destroyed) upSocket.destroy();
+        });
+        upSocket.once("close", () => {
+          if (!clientSocket.destroyed) clientSocket.destroy();
+        });
+        return;
+      }
+
+      if (status === 407) {
+        lastFailure = {
+          kind: "proxy_auth",
+          status: 407,
+          phase: "connect",
+          message: "proxy authentication failed (HTTP 407)",
+        };
+        if (!clientSocket.destroyed) {
+          clientSocket.end("HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+        }
+        if (!upSocket.destroyed) upSocket.destroy();
+        return;
+      }
+
+      if (!clientSocket.destroyed) {
+        clientSocket.end(`HTTP/1.1 ${status} Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+      }
+      if (!upSocket.destroyed) upSocket.destroy();
+    };
+
+    upSocket.on("data", onUpData);
+    upSocket.on("error", (err) => {
+      if (!tunnelEstablished) {
+        failConnect({
+          kind: "proxy_connection",
+          code: err?.code || "PROXY_CONNECTION_FAILED",
+          phase: "connect",
+          message: "proxy connection failed",
+        });
+      }
+    });
+    upSocket.on("end", () => {
+      if (!tunnelEstablished) {
+        failConnect({
+          kind: "proxy_connection",
+          code: "PROXY_EOF",
+          phase: "connect",
+          message: "proxy closed connection during CONNECT",
+        });
+      }
+    });
+    clientSocket.once("close", () => {
+      if (!tunnelEstablished && !upSocket.destroyed) upSocket.destroy();
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    const onErr = (err) => reject(err);
+    relayServer.once("error", onErr);
+    relayServer.listen(0, "127.0.0.1", () => {
+      relayServer.off("error", onErr);
+      resolve();
+    });
+  });
+  relayServer.unref();
+
+  const addr = relayServer.address();
+  const url = `http://127.0.0.1:${addr.port}`;
+
+  return {
+    url,
+    getLastFailure: () => lastFailure,
+    clearLastFailure: () => {
+      lastFailure = null;
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      for (const sock of activeSockets) {
+        try {
+          sock.destroy();
+        } catch {}
+      }
+      activeSockets.clear();
+      await new Promise((resolve) => relayServer.close(() => resolve()));
+    },
+  };
+}
+
+export async function createTaskContext(chromium, config, engines, options = {}) {
   let selected = validateBrowserConfig(config);
   if (selected.identityProfile === true || selected.identityProfile === "random") {
     selected = validateBrowserConfig({ ...selected, identityProfile: resolveIdentityProfile(selected).id });
@@ -475,21 +733,92 @@ export async function createTaskContext(chromium, config, engines) {
   const profile = resolveIdentityProfile(selected);
   const contextOptions = browserContextOptions(selected);
   if (profile?.userAgent && !contextOptions.userAgent) contextOptions.userAgent = profile.userAgent;
-  const browserType = await selectBrowserType(chromium, selected, engines);
-  const browser = await browserType.launch(browserLaunchOptions(selected));
+
+  const configDir = options?.configDir || process.env.PROMETHEUS_CONFIG_DIR;
+  let proxySession = null;
+  let proxyRelay = null;
+  if (selected.proxy) {
+    if (!configDir) {
+      throw new BrowserSessionError("PROMETHEUS_CONFIG_DIR is required for proxy sessions");
+    }
+    proxySession = await acquireTaskSession(configDir, selected);
+    try {
+      proxyRelay = await createLocalProxyRelay({
+        server: proxySession.server,
+        credentials: proxySession.credentials,
+      });
+      verifySessionGeneration(configDir, selected, proxySession.generation);
+    } catch (error) {
+      await proxyRelay?.close().catch(() => {});
+      proxySession.release();
+      throw new Error(sanitizePoolProxyError(error, selected, proxySession.credentials));
+    }
+  }
+
+  let browser = null;
   try {
+    const browserType = await selectBrowserType(chromium, selected, engines);
+    const launchOptions = browserLaunchOptions(selected);
+    if (proxyRelay) {
+      launchOptions.proxy = { server: proxyRelay.url };
+      verifySessionGeneration(configDir, selected, proxySession.generation);
+    }
+    browser = await browserType.launch(launchOptions);
     const browserVersion = browser.version?.() ?? null;
     if (selected.automationCompatibility && !contextOptions.userAgent) {
       contextOptions.userAgent = nativeChromiumUserAgent(browserVersion, process.platform, selected.channel);
     }
     const context = await browser.newContext(contextOptions);
     await prepareContext(context, selected, profile);
-    const runtime = configuredProfile(selected) || selected.automationCompatibility
+
+    if (proxySession && proxyRelay) {
+      const originalClose = browser.close.bind(browser);
+      let cleanedUp = false;
+      const cleanupProxy = async () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        try {
+          await proxyRelay.close().catch(() => {});
+        } finally {
+          proxySession.release();
+        }
+      };
+      browser.close = async () => {
+        try {
+          await originalClose();
+        } finally {
+          await cleanupProxy();
+        }
+      };
+    }
+
+    const runtime = configuredProfile(selected) || selected.automationCompatibility || selected.proxy
       ? { ...browserRuntimeInfo(selected), contextOptions: structuredClone(contextOptions), browserVersion }
       : undefined;
-    return { browser, context, ...(runtime ? { runtime } : {}) };
+    return {
+      browser,
+      context,
+      ...(runtime ? { runtime } : {}),
+      ...(proxySession && proxyRelay
+        ? {
+            proxySession: {
+              session: proxySession.session,
+              generation: proxySession.generation,
+              proxyId: proxySession.proxyId,
+              authRecords: proxySession.authRecords,
+              ownerId: proxySession.ownerId,
+            },
+            proxyRelay,
+          }
+        : {}),
+    };
   } catch (error) {
-    await browser.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+    if (proxyRelay) await proxyRelay.close().catch(() => {});
+    if (proxySession) proxySession.release();
+    if (selected.proxy) {
+      throw new Error(sanitizePoolProxyError(error, selected, proxySession?.credentials));
+    }
     throw error;
   }
 }
