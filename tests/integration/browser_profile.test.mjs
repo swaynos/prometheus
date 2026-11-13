@@ -362,7 +362,7 @@ test('installed runtime starts with isolated dependencies and reuses migrated st
       res.end(Buffer.from('89504e470d0a1a0a', 'hex'));
     } else {
       res.setHeader('content-type', 'text/html');
-      res.end('<h1 id="account" hidden>Migration fixture account</h1><input id="upload" type="file"><script>document.querySelector("#account").hidden = localStorage.getItem("fixture") !== "approved";</script>');
+      res.end('<h1 id="account" hidden>Migration fixture account</h1><input id="upload" type="file"><button id="confirm" onclick="document.querySelector(\'#result\').textContent=\'Done\'">Confirm</button><div id="result"></div><div class="record"><span>Installed record</span></div><script>document.querySelector("#account").hidden = localStorage.getItem("fixture") !== "approved";</script>');
     }
   });
   server.listen(0, '127.0.0.1');
@@ -416,6 +416,8 @@ test('installed runtime starts with isolated dependencies and reuses migrated st
     assert.equal(status.contextOptions.locale, 'en-GB');
     assert.match(status.contextOptions.userAgent, /^Mozilla\/5\.0/);
     assert.equal(status.launchOptions.slowMo, 0);
+    assert.equal(JSON.parse(await call('browser_click', { selector: '#confirm', expect: { kind: 'text', selector: '#result', text: 'Done' } })).status, 'confirmed');
+    assert.equal(JSON.parse(await call('browser_extract', { root: '.record', fields: { title: { selector: 'span' } } })).records[0].title, 'Installed record');
     const upload = path.join(f.directory, 'input.png');
     fs.writeFileSync(upload, Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489', 'hex'));
     const attached = JSON.parse(await call('browser_upload_image', { selector: '#upload', path: upload }));
