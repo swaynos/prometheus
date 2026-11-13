@@ -21,3 +21,5 @@ The browser runtime is separate from goal execution and installs under `<config_
 | [Resource selection rule](../rules/resource-selection.md) | Compact workflow and safeguard rule loaded in OpenCode instructions. |
 | [Browser reference](RESOURCE-SELECTION.md) | Shared settings, profiles, login handoff, file transfers, and failure handling. |
 | [Operations guide](BROWSER-OPERATIONS.md) | Installation, migration, updates, rollback, and verification procedures. |
+| [Proxy pool specification](BROWSER-PROXY-SPEC.md) | Proposed persistent sessions, proxy rotation, safety, and acceptance criteria. |
+| [Proxy pool low-level design](BROWSER-PROXY-LLD.md) | Proposed storage, lifecycle, routing, integration, and test design. |
