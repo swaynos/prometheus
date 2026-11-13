@@ -3,7 +3,7 @@
 // Restores approved origin login state privately; never exposes state values.
 
 import { createInterface } from "node:readline";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, writeFile, open, realpath } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
@@ -46,11 +46,12 @@ const TOOLS = [
   toolDef("browser_navigate_back", "Go back in history."),
   toolDef("browser_forward", "Go forward in history."),
   toolDef("browser_reload", "Reload the current page after allowing in-flight network requests to settle.", { wait_until: { type: "string", enum: WAIT_UNTIL_ENUM }, timeout: { type: "number", description: "Total reload budget in seconds, bounded by the transport budget." } }),
-  toolDef("browser_snapshot", "Readable text of the current page (title, URL, body text).", { max_chars: { type: "number" } }),
+  toolDef("browser_snapshot", "Readable text of the current page or frame.", { max_chars: { type: "number" }, frame: { type: "string" } }),
   toolDef("browser_markdown", "Current page rendered as terse Markdown-ish text.", { max_chars: { type: "number" } }),
-  toolDef("browser_interactive_elements", "List clickable/typeable elements with stable refs.", { limit: { type: "number" } }),
+  toolDef("browser_interactive_elements", "List clickable/typeable elements with document-scoped refs.", { limit: { type: "number" }, frame: { type: "string" } }),
+  toolDef("browser_frames", "List frames in the active page with opaque IDs."),
   toolDef("browser_links", "List anchor links as {text, href}.", { limit: { type: "number" } }),
-  toolDef("browser_click", "Click an element by ref or selector.", { ref: { type: "string" }, selector: { type: "string" }, humanize: { type: "boolean", description: "Simulate curved mouse movement before clicking." } }),
+  toolDef("browser_click", "Click once, optionally observing a fresh expected outcome.", { ref: { type: "string" }, selector: { type: "string" }, frame: { type: "string" }, humanize: { type: "boolean" }, expect: { type: "object" }, timeout: { type: "number" } }),
   toolDef("browser_fill", "Set the value of an input by ref or selector.", { ref: { type: "string" }, selector: { type: "string" }, value: { type: "string" } }, ["value"]),
   toolDef("browser_type", "Type text into an input (appends). Optional fixed delay_ms supports interfaces that need spaced keyboard events; default 0.", { ref: { type: "string" }, selector: { type: "string" }, text: { type: "string" }, delay_ms: { type: "number", minimum: 0, maximum: 1000 }, humanize: { type: "boolean", description: "Simulate human typing jitter (50-150ms per character)." } }, ["text"]),
   toolDef("browser_fill_form", "Fill multiple fields, optionally submit.", { fields: { type: "array" }, submit_ref: { type: "string" }, submit_selector: { type: "string" } }, ["fields"]),
@@ -59,12 +60,13 @@ const TOOLS = [
   toolDef("browser_get_attribute", "Read an attribute of an element.", { ref: { type: "string" }, selector: { type: "string" }, attribute: { type: "string" } }, ["attribute"]),
   toolDef("browser_count", "Count elements matching a selector.", { selector: { type: "string" } }, ["selector"]),
   toolDef("browser_search", "Find substring matches in visible page text.", { query: { type: "string" }, limit: { type: "number" } }, ["query"]),
-  toolDef("browser_extract", "Extract a structured object from the page given {field: selector}.", { schema: { type: "object" } }, ["schema"]),
+  toolDef("browser_extract", "Extract fields or bounded repeated records.", { schema: { type: "object" }, root: { type: "string" }, fields: { type: "object" }, limit: { type: "number" }, frame: { type: "string" } }),
   toolDef("browser_evaluate", "Evaluate a JavaScript expression in the page.", { expression: { type: "string" } }, ["expression"]),
   toolDef("browser_console_messages", "Return console messages logged by the page."),
-  toolDef("browser_scroll", "Scroll the page or an element.", { direction: { type: "string" }, amount: { type: "number" }, selector: { type: "string" } }),
+  toolDef("browser_scroll", "Scroll once, optionally waiting for a change.", { direction: { type: "string" }, amount: { type: "number" }, selector: { type: "string" }, frame: { type: "string" }, expect: { type: "object" }, timeout: { type: "number" } }),
   toolDef("browser_wait_for", "Wait for a selector to appear.", { selector: { type: "string" }, timeout: { type: "number" } }, ["selector"]),
   toolDef("browser_wait_for_text", "Wait for text to appear in the page.", { text: { type: "string" }, timeout: { type: "number" } }, ["text"]),
+  toolDef("browser_wait_for_change", "Wait for a bounded declarative change from the current state.", { expect: { type: "object" }, frame: { type: "string" }, timeout: { type: "number" } }, ["expect"]),
   toolDef("browser_screenshot", "Capture the viewport as a PNG saved to path.", { path: { type: "string" }, full_page: { type: "boolean" } }, ["path"]),
   toolDef("browser_upload_image", "Attach a user-requested local PNG, JPEG, WebP, or GIF through a visible file input or upload button. Returns verified attachment metadata, not server acceptance. Inspect the page before submitting or retrying.", { ref: { type: "string" }, selector: { type: "string" }, path: { type: "string" } }, ["path"]),
   toolDef("browser_download", "Capture a download through a visible ref or selector, or retrieve a URL through the authenticated task page; save only after validation.", { url: { type: "string" }, ref: { type: "string" }, selector: { type: "string" }, path: { type: "string" }, min_bytes: { type: "number" }, expected_sha256: { type: "string" }, expected_content_type: { type: "string" }, signature_hex: { type: "string" } }, ["path"]),
@@ -76,6 +78,24 @@ const TOOLS = [
   toolDef("browser_configure", "Adjust runtime settings for the browser session without restarting the server.", { humanize: { type: "boolean", description: "Enable or disable simulated human behavior (typing delays, curved mouse movement, navigation delays) for all subsequent actions in this session." } }),
   toolDef("browser_close", "Close the browser and reset state."),
 ];
+const EXPECT_SCHEMA = {
+  type: "object",
+  description: "Observe a fresh change. A response confirms only the response, not task success.",
+  properties: {
+    kind: { type: "string", enum: ["visible", "hidden", "text", "count_increase", "new", "url", "popup", "response"] },
+    selector: { type: "string" }, text: { type: "string" },
+    url: { type: "string", description: "Exact expected URL for url events." },
+    path: { type: "string", description: "Exact same-origin response path without query." },
+    status: { type: "integer", minimum: 100, maximum: 599 },
+  }, required: ["kind"],
+};
+for (const tool of TOOLS) {
+  if (["browser_click", "browser_fill_form", "browser_scroll", "browser_wait_for_change"].includes(tool.name)) tool.inputSchema.properties.expect = EXPECT_SCHEMA;
+  if (tool.name === "browser_fill_form") tool.inputSchema.properties.timeout = { type: "number", description: "Submission observation budget in seconds." };
+  if (["browser_fill", "browser_fill_form", "browser_type", "browser_select_option", "browser_press_key", "browser_get_attribute", "browser_count", "browser_wait_for", "browser_wait_for_text", "browser_upload_image", "browser_download", "browser_save_media"].includes(tool.name)) {
+    tool.inputSchema.properties.frame = { type: "string", description: "Opaque frame ID from browser_frames." };
+  }
+}
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
 
 let chromium = null;
@@ -87,10 +107,33 @@ let activeIndex = 0;
 const consoleMessages = [];
 const hydratedOrigins = new Map();
 const verifiedOrigins = new Set();
+const frameIds = new Map();
+const references = new Map();
+let refCounter = 0;
+let activeRequest = null;
+
+function frameId(frame) {
+  if (!frameIds.has(frame)) frameIds.set(frame, `f${frameIds.size + 1}-${randomUUID().slice(0, 8)}`);
+  return frameIds.get(frame);
+}
+
+function targetFrame(page, args = {}) {
+  if (!args.frame) return page.mainFrame();
+  const frame = page.frames().find(candidate => frameId(candidate) === args.frame);
+  if (!frame || frame.isDetached()) throw new Error("frame is stale or not in the active page");
+  return frame;
+}
+
+function invalidateFrame(frame) {
+  for (const [ref, entry] of references) if (entry.frame === frame) { references.delete(ref); void entry.handle.dispose().catch(() => {}); }
+}
 
 function registerPage(page) {
   if (pages.includes(page)) return;
   pages.push(page);
+  page.on("framenavigated", invalidateFrame);
+  page.on("framedetached", frame => { invalidateFrame(frame); frameIds.delete(frame); });
+  page.on("close", () => { for (const frame of page.frames()) { invalidateFrame(frame); frameIds.delete(frame); } });
   page.on("console", (msg) => {
     if (consoleMessages.length < 500) consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
   });
@@ -132,6 +175,8 @@ async function closeBrowser() {
   activeIndex = 0;
   hydratedOrigins.clear();
   verifiedOrigins.clear();
+  references.clear();
+  frameIds.clear();
   consoleMessages.length = 0;
   if (toClose) { try { await toClose.close(); } catch {} }
 }
@@ -185,9 +230,18 @@ const isElementDisabled = (el) =>
   el.hasAttribute("data-visually-disabled") ||
   Boolean(el.closest("[inert]"));
 
-async function tagInteractive(page, limit) {
-  return page.evaluate(
-    ({ sel, attr, cap }) => {
+async function tagInteractive(page, limit, args = {}) {
+  const frame = targetFrame(page, args);
+  for (let current = frame; current.parentFrame(); current = current.parentFrame()) {
+    const host = await current.frameElement();
+    try { if (!(await host.isVisible())) return []; }
+    finally { await host.dispose(); }
+  }
+  invalidateFrame(frame);
+  const start = refCounter;
+  refCounter += 501;
+  const items = await frame.evaluate(
+    ({ sel, attr, cap, start }) => {
       const isVisible = (el) => {
         if (el.matches('input[type="hidden"]')) return false;
         if (typeof el.checkVisibility === "function" && !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
@@ -201,24 +255,45 @@ async function tagInteractive(page, limit) {
         el.hasAttribute("data-visually-disabled") || Boolean(el.closest("[inert]"));
       const nodes = Array.from(document.querySelectorAll(sel)).filter(isVisible).slice(0, cap);
       return nodes.map((el, i) => {
-        const ref = `e${i + 1}`;
+        const ref = `e${start + i + 1}`;
         el.setAttribute(attr, ref);
-        const label = (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").trim().slice(0, 80);
+        const label = (el.innerText || (el.matches('input[type="button"],input[type="submit"]') ? el.value : "") || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").trim().slice(0, 80);
         return { ref, tag: el.tagName.toLowerCase(), type: el.getAttribute("type") || undefined, text: label, disabled: isDisabled(el) };
       });
     },
-    { sel: INTERACTIVE_SELECTOR, attr: REF_TAG, cap: Number.isFinite(limit) ? limit : 200 },
+    { sel: INTERACTIVE_SELECTOR, attr: REF_TAG, cap: Math.max(0, Math.min(Number.isFinite(limit) ? Math.floor(limit) : 200, 500)), start },
   );
+  for (const item of items) {
+    const handle = await frame.locator(`[${REF_TAG}="${item.ref}"]`).elementHandle();
+    if (handle) references.set(item.ref, { page, frame, handle });
+  }
+  return items;
 }
 
 function locatorFor(page, args) {
-  if (args.ref) return page.locator(`[${REF_TAG}="${String(args.ref).replace(/"/g, '\\"')}"]`);
-  if (args.selector) return page.locator(args.selector);
+  if (args.ref) {
+    const entry = references.get(args.ref);
+    if (!entry || entry.page !== page || entry.frame.isDetached() || (args.frame && frameId(entry.frame) !== args.frame)) throw new Error("reference is stale or belongs to another page or frame");
+    return entry.frame.locator(`[${REF_TAG}="${args.ref}"]`);
+  }
+  if (args.selector) return targetFrame(page, args).locator(args.selector);
   throw new Error("a ref or selector is required");
+}
+
+async function verifiedLocator(page, args) {
+  const locator = locatorFor(page, args).first();
+  if (args.ref) {
+    const entry = references.get(args.ref);
+    if (!entry || await locator.count() !== 1 || !(await locator.evaluate((el, original) => el === original && el.isConnected, entry.handle))) throw new Error("reference target changed; inspect the page again");
+  }
+  return locator;
 }
 
 async function assertActionable(locator, action, timeout = DEFAULT_TIMEOUT) {
   await locator.waitFor({ state: "visible", timeout });
+  const ref = await locator.getAttribute(REF_TAG);
+  const entry = ref ? references.get(ref) : null;
+  if (entry && !(await locator.evaluate((el, original) => el === original, entry.handle))) throw new Error("reference target changed; inspect the page again");
   if (await locator.evaluate(isElementDisabled)) throw new Error(`${action} target is disabled`);
 }
 
@@ -279,6 +354,98 @@ async function fillAndVerify(locator, value) {
 function boundedWaitMs(seconds) {
   if (seconds !== undefined && (!Number.isFinite(seconds) || seconds <= 0)) throw new Error("timeout must be a positive number of seconds");
   return Math.min(Number.isFinite(seconds) ? seconds * 1000 : DEFAULT_TIMEOUT, MAX_WAIT_MS);
+}
+
+function validateExpectation(expect) {
+  if (!expect || typeof expect !== "object" || Array.isArray(expect)) throw new Error("expect must be an object");
+  const kinds = ["visible", "hidden", "text", "count_increase", "new", "url", "popup", "response"];
+  if (!kinds.includes(expect.kind)) throw new Error("invalid expectation kind");
+  if (["visible", "hidden", "text", "count_increase", "new"].includes(expect.kind) && (typeof expect.selector !== "string" || !expect.selector.trim())) throw new Error("expect.selector is required");
+  if (expect.kind === "text" && typeof expect.text !== "string") throw new Error("expect.text is required");
+  if (expect.kind === "url" && (typeof expect.url !== "string" || !expect.url)) throw new Error("expect.url is required");
+  if (expect.kind === "response" && (typeof expect.path !== "string" || !expect.path.startsWith("/") || expect.path.includes("?") || expect.path.includes("#"))) throw new Error("response path must be an exact path without query or fragment");
+  if (expect.status !== undefined && (!Number.isInteger(expect.status) || expect.status < 100 || expect.status > 599)) throw new Error("invalid expected status");
+}
+
+async function observationState(frame, expect) {
+  if (["url", "popup", "response"].includes(expect.kind)) return null;
+  const locator = frame.locator(expect.selector);
+  const count = await locator.count();
+  const visible = count > 0 && await locator.first().isVisible();
+  const value = expect.kind === "text" && count ? (await locator.first().textContent() || "").slice(0, 4096) : null;
+  return { count, visible, value };
+}
+
+function changed(expect, before, after) {
+  if (expect.kind === "new" || expect.kind === "count_increase") return after.count > before.count;
+  if (expect.kind === "visible") return !before.visible && after.visible;
+  if (expect.kind === "hidden") return before.visible && !after.visible;
+  if (expect.kind === "text") return after.visible && after.value?.includes(expect.text) && before.value !== after.value;
+  return false;
+}
+
+async function observeChange(page, frame, expect, timeout, signal, action) {
+  validateExpectation(expect);
+  const started = Date.now();
+  const before = await observationState(frame, expect);
+  const initialUrl = page.url();
+  let event = null;
+  let denial = null;
+  let navigationStatus = null;
+  const errors = [];
+  const onPopup = () => { event = { kind: "popup" }; };
+  const onResponse = response => {
+    try {
+      const url = new URL(response.url());
+      if (url.origin === new URL(initialUrl).origin && response.status() >= 400 && errors.length < 10) errors.push({ kind: "http_error", status: response.status() });
+      if (response.request().isNavigationRequest() && response.frame() === page.mainFrame()) {
+        navigationStatus = response.status();
+        if (response.status() === 401 || response.status() === 403) denial = { kind: "navigation", status: response.status() };
+      }
+      if (url.origin === new URL(initialUrl).origin && url.pathname === expect.path) {
+        event = { kind: "response", status: response.status() };
+      }
+    } catch { /* Non-HTTP URLs are not evidence. */ }
+  };
+  if (expect.kind === "popup") page.on("popup", onPopup);
+  if (action || expect.kind === "response") page.on("response", onResponse);
+  let dispatched = false;
+  try {
+    if (signal?.aborted) return { status: "not_attempted", reason: "cancelled" };
+    if (action) {
+      try { await action(Math.max(1, timeout - (Date.now() - started))); dispatched = true; }
+      catch { return { status: "unknown", reason: "action_interrupted", diagnostic: "inspect the page before retrying" }; }
+    }
+    while (Date.now() - started < timeout && !signal?.aborted) {
+      if (page.isClosed() || frame.isDetached()) return { status: action ? "unknown" : "unresolved", reason: "target_closed" };
+      if (denial) return { status: "access_denied", evidence: denial };
+      if (navigationStatus !== null) {
+        const classification = await navigationClassification(page, navigationStatus, Math.max(1, timeout - (Date.now() - started)));
+        if (/challenge detected|access denied/i.test(classification)) return { status: "access_denied", evidence: { kind: "navigation", status: navigationStatus } };
+        navigationStatus = null;
+      }
+      if (expect.kind === "url" && page.url() !== initialUrl && page.url() === expect.url) return { status: "confirmed", evidence: { kind: "url" } };
+      if (event) {
+        if (event.status === 401 || event.status === 403) return { status: "access_denied", evidence: event };
+        if (expect.kind !== "response" || expect.status === undefined || event.status === expect.status) return { status: "confirmed", evidence: event };
+      }
+      if (before) {
+        try { if (changed(expect, before, await observationState(frame, expect))) return { status: "confirmed", evidence: { kind: expect.kind } }; }
+        catch (error) { if (!/execution context|navigation|context was destroyed/i.test(String(error))) throw error; }
+      }
+      await new Promise(resolve => {
+        const timer = setTimeout(done, Math.min(50, Math.max(1, timeout - (Date.now() - started))));
+        function done() { clearTimeout(timer); signal?.removeEventListener("abort", done); resolve(); }
+        signal?.addEventListener("abort", done, { once: true });
+      });
+    }
+    return { status: action && dispatched ? "unknown" : "unresolved", reason: signal?.aborted ? "cancelled" : "timeout", ...(event ? { evidence: event } : {}), ...(errors.length ? { diagnostics: errors } : {}), ...(action ? { diagnostic: "inspect the page before retrying" } : {}) };
+  } catch {
+    return { status: action ? "unknown" : "unresolved", reason: "observation_interrupted", ...(action ? { diagnostic: "inspect the page before retrying" } : {}) };
+  } finally {
+    page.off("popup", onPopup);
+    page.off("response", onResponse);
+  }
 }
 
 async function navigationClassification(page, status, timeout = DEFAULT_TIMEOUT) {
@@ -426,8 +593,9 @@ const HANDLERS = {
   async browser_snapshot(args) {
     const page = activePage();
     const cap = Number.isFinite(args.max_chars) ? args.max_chars : 4000;
-    const body = await page.evaluate(() => document.body ? document.body.innerText : "");
-    return text(`# ${await page.title()}\nURL: ${page.url()}\n\n${body.slice(0, cap)}`);
+    const frame = targetFrame(page, args);
+    const body = await frame.evaluate(() => document.body ? document.body.innerText : "");
+    return text(`# ${await frame.title()}\nURL: ${frame.url()}\n\n${body.slice(0, cap)}`);
   },
   async browser_markdown(args) {
     const page = activePage();
@@ -445,8 +613,16 @@ const HANDLERS = {
     return text(md.slice(0, cap));
   },
   async browser_interactive_elements(args) {
-    const list = await tagInteractive(activePage(), args.limit);
+    const list = await tagInteractive(activePage(), args.limit, args);
     return text(list.map((e) => `${e.ref} <${e.tag}${e.type ? ` type=${e.type}` : ""}> ${e.text}${e.disabled ? " [disabled]" : ""}`).join("\n") || "(none)");
+  },
+  async browser_frames() {
+    const page = activePage();
+    return text(page.frames().slice(0, 100).map(frame => {
+      let origin = null;
+      try { origin = new URL(frame.url()).origin; } catch {}
+      return { id: frameId(frame), parent: frame.parentFrame() ? frameId(frame.parentFrame()) : null, name: frame.name().slice(0, 100), origin, main: frame === page.mainFrame() };
+    }));
   },
   async browser_links(args) {
     const page = activePage();
@@ -456,8 +632,24 @@ const HANDLERS = {
   },
   async browser_click(args) {
     const page = activePage();
-    const locator = locatorFor(page, args).first();
+    const locator = await verifiedLocator(page, args);
+    if (args.expect) {
+      validateExpectation(args.expect);
+      const timeout = boundedWaitMs(args.timeout);
+      const started = Date.now();
+      await assertActionable(locator, "click", timeout);
+      const entry = args.ref ? references.get(args.ref) : null;
+      if (entry && !(await locator.evaluate((el, original) => el === original, entry.handle))) throw new Error("reference target changed; inspect the page again");
+      const frame = entry?.frame ?? targetFrame(page, args);
+      const result = await observeChange(page, frame, args.expect, Math.max(1, timeout - (Date.now() - started)), activeRequest?.signal, async remaining => {
+        if (resolveHumanize(args.humanize)) await humanClick(locator, page, { timeout: remaining });
+        else await locator.click({ timeout: remaining });
+      });
+      return text({ actionId: randomUUID(), dispatch: result.status === "not_attempted" ? "not_attempted" : result.reason === "action_interrupted" ? "unknown" : "completed", ...result, elapsedMs: Date.now() - started });
+    }
     await assertActionable(locator, "click");
+    const entry = args.ref ? references.get(args.ref) : null;
+    if (entry && !(await locator.evaluate((el, original) => el === original, entry.handle))) throw new Error("reference target changed; inspect the page again");
     if (resolveHumanize(args.humanize)) await humanClick(locator, page, { timeout: DEFAULT_TIMEOUT });
     else await locator.click({ timeout: DEFAULT_TIMEOUT });
     return text(`clicked at ${page.url()}`);
@@ -465,7 +657,7 @@ const HANDLERS = {
   async browser_fill(args) {
     if (typeof args.value !== "string") throw new Error("value is required");
     const page = activePage();
-    await fillAndVerify(locatorFor(page, args).first(), args.value);
+    await fillAndVerify(await verifiedLocator(page, args), args.value);
     return text(`filled and verified at ${page.url()}`);
   },
   async browser_type(args) {
@@ -473,7 +665,7 @@ const HANDLERS = {
     const delay = args.delay_ms === undefined ? 0 : args.delay_ms;
     if (!Number.isFinite(delay) || delay < 0 || delay > 1000) throw new Error("delay_ms must be from 0 to 1000 milliseconds");
     const page = activePage();
-    const locator = locatorFor(page, args).first();
+    const locator = await verifiedLocator(page, args);
     if (resolveHumanize(args.humanize) && args.delay_ms === undefined) {
       const deadline = performance.now() + MAX_WAIT_MS;
       await assertActionable(locator, "type", MAX_WAIT_MS);
@@ -488,9 +680,13 @@ const HANDLERS = {
   },
   async browser_fill_form(args) {
     if (!Array.isArray(args.fields)) throw new Error("fields array is required");
+    if (args.expect) {
+      validateExpectation(args.expect);
+      if (!args.submit_ref && !args.submit_selector) throw new Error("expect requires a submit control");
+    }
     const page = activePage();
     for (const field of args.fields) {
-      const loc = locatorFor(page, field).first();
+      const loc = await verifiedLocator(page, { ...field, frame: field.frame ?? args.frame });
       const type = field.type || "text";
       if (type === "check" || type === "uncheck" || type === "select") {
         await assertActionable(loc, "fill");
@@ -500,31 +696,37 @@ const HANDLERS = {
       } else await fillAndVerify(loc, String(field.value ?? ""));
     }
     if (args.submit_ref || args.submit_selector) {
-      const submit = locatorFor(page, { ref: args.submit_ref, selector: args.submit_selector }).first();
+      const submit = await verifiedLocator(page, { ref: args.submit_ref, selector: args.submit_selector, frame: args.frame });
       await assertActionable(submit, "submit");
+      if (args.expect) {
+        const frame = args.submit_ref ? references.get(args.submit_ref).frame : targetFrame(page, args);
+        const started = Date.now();
+        const result = await observeChange(page, frame, args.expect, boundedWaitMs(args.timeout), activeRequest?.signal, remaining => submit.click({ timeout: remaining }));
+        return text({ actionId: randomUUID(), dispatch: result.status === "not_attempted" ? "not_attempted" : result.reason === "action_interrupted" ? "unknown" : "completed", ...result, elapsedMs: Date.now() - started, fieldsFilled: args.fields.length });
+      }
       await submit.click({ timeout: DEFAULT_TIMEOUT });
     }
     return text(`filled ${args.fields.length} field(s)${args.submit_ref || args.submit_selector ? " and clicked submit control" : ""} at ${page.url()}`);
   },
   async browser_select_option(args) {
     const page = activePage();
-    const locator = page.locator(args.selector).first();
+    const locator = await verifiedLocator(page, args);
     await assertActionable(locator, "select");
     await locator.selectOption(args.value, { timeout: DEFAULT_TIMEOUT });
     return text(`selected at ${page.url()}`);
   },
   async browser_press_key(args) {
     const page = activePage();
-    if (args.selector) await page.locator(args.selector).first().press(args.key, { timeout: DEFAULT_TIMEOUT });
+    if (args.selector) await targetFrame(page, args).locator(args.selector).first().press(args.key, { timeout: DEFAULT_TIMEOUT });
     else await page.keyboard.press(args.key);
     return text(`pressed ${args.key}`);
   },
   async browser_get_attribute(args) {
-    const value = await locatorFor(activePage(), args).first().getAttribute(args.attribute, { timeout: DEFAULT_TIMEOUT });
+    const value = await (await verifiedLocator(activePage(), args)).getAttribute(args.attribute, { timeout: DEFAULT_TIMEOUT });
     return text(value ?? "");
   },
   async browser_count(args) {
-    return text(String(await activePage().locator(args.selector).count()));
+    return text(String(await targetFrame(activePage(), args).locator(args.selector).count()));
   },
   async browser_search(args) {
     const page = activePage();
@@ -544,8 +746,31 @@ const HANDLERS = {
     return text(matches.length ? matches.map((m, i) => `${i + 1}. ...${m}...`).join("\n") : "(no matches)");
   },
   async browser_extract(args) {
+    if (args.root !== undefined || args.fields !== undefined) {
+      if (typeof args.root !== "string" || !args.root.trim() || !args.fields || typeof args.fields !== "object" || Array.isArray(args.fields)) throw new Error("root and fields are required");
+      const entries = Object.entries(args.fields);
+      if (!entries.length || entries.length > 30 || entries.some(([key, spec]) => !key || key.length > 100 || !spec || typeof spec !== "object" || typeof spec.selector !== "string" || !spec.selector || (spec.attribute !== undefined && (typeof spec.attribute !== "string" || !/^(href|src|title|alt|aria-[\w-]+|data-[\w-]+)$/.test(spec.attribute))))) throw new Error("invalid extraction fields");
+      const limit = args.limit === undefined ? 30 : args.limit;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("record limit must be 1 to 100");
+      const result = await targetFrame(activePage(), args).evaluate(({ root, fields, limit }) => {
+        const roots = Array.from(document.querySelectorAll(root));
+        const records = roots.slice(0, limit).map(node => {
+          const record = Object.create(null);
+          for (const [key, spec] of Object.entries(fields)) {
+            const el = node.querySelector(spec.selector);
+            if (!el || el.matches('input,textarea,select,[contenteditable]') || !el.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true })) { record[key] = null; continue; }
+            const value = spec.attribute ? (spec.attribute === "href" && el instanceof HTMLAnchorElement ? el.href : el.getAttribute(spec.attribute)) : el.innerText;
+            record[key] = value == null ? null : value.trim().slice(0, 1000);
+          }
+          return record;
+        });
+        return { records, truncated: roots.length > limit };
+      }, { root: args.root, fields: args.fields, limit });
+      while (JSON.stringify(result).length > 100000 && result.records.length) { result.records.pop(); result.truncated = true; }
+      return text(result);
+    }
     if (!args.schema || typeof args.schema !== "object") throw new Error("schema object is required");
-    const result = await activePage().evaluate((schema) => {
+    const result = await targetFrame(activePage(), args).evaluate((schema) => {
       const out = {};
       for (const [field, spec] of Object.entries(schema)) {
         const list = field.endsWith("[]");
@@ -573,20 +798,30 @@ const HANDLERS = {
   async browser_scroll(args) {
     const dir = args.direction || "down";
     const amount = Number.isFinite(args.amount) ? args.amount : undefined;
-    await activePage().evaluate(({ dir, amount, selector }) => {
+    if (!["up", "down", "top", "bottom"].includes(dir)) throw new Error("invalid scroll direction");
+    const page = activePage();
+    const frame = targetFrame(page, args);
+    const scroll = () => frame.evaluate(({ dir, amount, selector }) => {
       const target = selector ? document.querySelector(selector) : window;
+      if (!target) throw new Error("scroll target not found");
       const by = amount || (target === window ? window.innerHeight : 400);
       if (dir === "top") (target === window ? window.scrollTo(0, 0) : (target.scrollTop = 0));
       else if (dir === "bottom") (target === window ? window.scrollTo(0, document.body.scrollHeight) : (target.scrollTop = target.scrollHeight));
       else if (target === window) window.scrollBy(dir === "up" ? -by : by, 0) || window.scrollBy(0, dir === "up" ? -by : by);
       else target.scrollTop += dir === "up" ? -by : by;
     }, { dir, amount, selector: args.selector });
+    if (args.expect) {
+      const started = Date.now();
+      const result = await observeChange(page, frame, args.expect, boundedWaitMs(args.timeout), activeRequest?.signal, scroll);
+      return text({ actionId: randomUUID(), dispatch: result.status === "not_attempted" ? "not_attempted" : result.reason === "action_interrupted" ? "unknown" : "completed", ...result, elapsedMs: Date.now() - started });
+    }
+    await scroll();
     return text(`scrolled ${dir}`);
   },
   async browser_wait_for(args) {
     const page = activePage();
     const timeout = boundedWaitMs(args.timeout);
-    try { await page.locator(args.selector).first().waitFor({ state: "attached", timeout }); }
+    try { await targetFrame(page, args).locator(args.selector).first().waitFor({ state: "attached", timeout }); }
     catch (error) {
       if (error?.name === "TimeoutError") throw new Error(`bounded wait expired after ${timeout}ms at ${page.url()}`);
       throw error;
@@ -596,12 +831,18 @@ const HANDLERS = {
   async browser_wait_for_text(args) {
     const page = activePage();
     const timeout = boundedWaitMs(args.timeout);
-    try { await page.getByText(args.text, { exact: false }).first().waitFor({ state: "visible", timeout }); }
+    try { await targetFrame(page, args).getByText(args.text, { exact: false }).first().waitFor({ state: "visible", timeout }); }
     catch (error) {
       if (error?.name === "TimeoutError") throw new Error(`bounded wait expired after ${timeout}ms at ${page.url()}`);
       throw error;
     }
     return text(`text appeared: ${args.text} at ${page.url()}`);
+  },
+  async browser_wait_for_change(args) {
+    const page = activePage();
+    const started = Date.now();
+    const result = await observeChange(page, targetFrame(page, args), args.expect, boundedWaitMs(args.timeout), activeRequest?.signal);
+    return text({ ...result, elapsedMs: Date.now() - started });
   },
   async browser_screenshot(args) {
     if (typeof args.path !== "string") throw new Error("path is required");
@@ -617,7 +858,7 @@ const HANDLERS = {
     };
     const page = activePage();
     const payload = await readUploadImage(args.path);
-    const locator = locatorFor(page, args).first();
+    const locator = await verifiedLocator(page, args);
     await assertActionable(locator, "upload", remaining());
     const direct = await locator.evaluate(el => el instanceof HTMLInputElement && el.type === "file");
     const input = direct ? await locator.elementHandle({ timeout: remaining() }) : (await clickForEvent(page, locator, "filechooser", remaining())).element();
@@ -643,7 +884,7 @@ const HANDLERS = {
     const page = activePage();
     let bytes, contentType = "";
     if (typeof args.selector === "string" || typeof args.ref === "string") {
-      const locator = locatorFor(page, args).first();
+      const locator = await verifiedLocator(page, args);
       await assertActionable(locator, "download", MAX_WAIT_MS);
       const responses = [];
       const recordResponse = (response) => responses.push(response);
@@ -695,7 +936,7 @@ const HANDLERS = {
     const destination = path.resolve(args.path);
     await assertDestinationAvailable(destination);
     const page = activePage();
-    const locator = locatorFor(page, args).first();
+    const locator = await verifiedLocator(page, args);
     await locator.waitFor({ state: "visible", timeout: DEFAULT_TIMEOUT });
     const media = await locator.evaluate(async (element, maxPixels) => {
       const assertPixelLimit = (width, height) => {
@@ -802,8 +1043,11 @@ async function handle(message) {
     const name = params?.name;
     const args = params?.arguments || {};
     if (!TOOL_NAMES.has(name)) return replyError(id, `unknown tool: ${name}`);
+    const controller = new AbortController();
+    activeRequest = { id, controller, signal: controller.signal };
     try { reply(id, await HANDLERS[name](args)); }
     catch (err) { replyError(id, `${name} failed: ${err instanceof Error ? err.message : String(err)}`); }
+    finally { if (activeRequest?.id === id) activeRequest = null; }
     return;
   }
   if (id !== undefined && id !== null) send({ jsonrpc: "2.0", id, error: { code: -32601, message: `method not found: ${method}` } });
@@ -815,6 +1059,10 @@ reader.on("line", (line) => {
   if (!line.trim()) return;
   let message;
   try { message = JSON.parse(line); } catch { return; }
+  if (message.method === "notifications/cancelled") {
+    if (activeRequest?.id === message.params?.requestId) activeRequest.controller.abort();
+    return;
+  }
   queue = queue.then(() => handle(message)).catch((err) => {
     process.stderr.write(`prometheus-browser: handler error: ${err instanceof Error ? err.stack : String(err)}\n`);
   });

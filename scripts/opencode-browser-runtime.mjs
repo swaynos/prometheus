@@ -227,12 +227,46 @@ export async function collectBrowserProfileEvidence(page) {
         return ext ? { vendor: gl.getParameter(ext.UNMASKED_VENDOR_WEBGL), renderer: gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) } : null;
       } catch { return null; }
     };
+    const identity = nav => ({ userAgent: nav.userAgent, platform: nav.platform,
+      language: nav.language, languages: [...nav.languages], hardwareConcurrency: nav.hardwareConcurrency,
+      clientHints: nav.userAgentData?.toJSON?.() ?? null });
+    let worker = null;
+    try {
+      const blob = new Blob([`onmessage = () => postMessage({userAgent:navigator.userAgent,platform:navigator.platform,language:navigator.language,languages:[...navigator.languages],hardwareConcurrency:navigator.hardwareConcurrency,clientHints:navigator.userAgentData?.toJSON?.() ?? null})`], { type: "text/javascript" });
+      const url = URL.createObjectURL(blob);
+      try {
+        worker = await new Promise(resolve => {
+          const w = new Worker(url);
+          const timer = setTimeout(() => { w.terminate(); resolve(null); }, 1000);
+          w.onmessage = event => { clearTimeout(timer); w.terminate(); resolve(event.data); };
+          w.onerror = () => { clearTimeout(timer); w.terminate(); resolve(null); };
+          w.postMessage(null);
+        });
+      } finally { URL.revokeObjectURL(url); }
+    } catch { /* Worker may be restricted by the document. */ }
+    let iframe = null;
+    try {
+      const el = document.createElement("iframe");
+      el.hidden = true;
+      document.body.append(el);
+      iframe = identity(el.contentWindow.navigator);
+      el.remove();
+    } catch { /* A document may prohibit frame creation. */ }
+    let notificationQuery = null;
+    try { notificationQuery = (await navigator.permissions.query({ name: "notifications" })).state; } catch {}
     return {
       userAgent: navigator.userAgent, platform: navigator.platform,
       clientHints: navigator.userAgentData?.toJSON?.() ?? null,
       viewport: { width: innerWidth, height: innerHeight }, screen: { width: screen.width, height: screen.height },
       deviceScaleFactor: devicePixelRatio, maxTouchPoints: navigator.maxTouchPoints,
       webgl: graphics("webgl"), webgl2: graphics("webgl2"),
+      document: identity(navigator), worker, iframe,
+      locale: Intl.DateTimeFormat().resolvedOptions().locale,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      plugins: Array.from(navigator.plugins, p => p.name),
+      pdfViewerEnabled: navigator.pdfViewerEnabled,
+      notification: { permission: typeof Notification === "undefined" ? null : Notification.permission, query: notificationQuery },
+      window: { innerWidth, innerHeight, outerWidth, outerHeight },
     };
   });
 }

@@ -38,7 +38,11 @@ export async function humanType(locator, text, options = {}) {
     return budget;
   };
   for (const char of text) {
-    await locator.pressSequentially(char, { timeout: remaining() });
+    try { await locator.pressSequentially(char, { timeout: remaining() }); }
+    catch (error) {
+      if (error?.name === "TimeoutError" || /Timeout .* exceeded/i.test(String(error))) throw new Error("typing deadline expired; input may be partial; inspect the field before retrying");
+      throw error;
+    }
     const delayBudget = remaining();
     if ((await randomDelay(min, max, delayBudget)) >= delayBudget) {
       throw new Error("typing deadline expired; input may be partial; inspect the field before retrying");

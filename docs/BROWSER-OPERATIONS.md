@@ -50,3 +50,11 @@ npm test
 ```
 
 Set `PROMETHEUS_TEST_BROWSER_CHANNEL=chrome` to include installed Chrome in channel and installed-runtime tests.
+
+For action outcomes, frames, records, change observation, and profile evidence run:
+
+```sh
+node --test tests/integration/browser_observations.test.mjs
+```
+
+Qualify installed Chrome separately on Linux and macOS. Record the browser and Playwright versions and the selected channel and mode. A missing browser or display dependency is an unverified configuration, not a passing result. Profile evidence is for controlled fixtures; it is not a claim of anonymity or access to a protected site.
