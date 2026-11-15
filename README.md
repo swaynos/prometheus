@@ -37,6 +37,8 @@ Require stable OpenCode **>=2.2.1 <3.0.0**. See the [package guide](packages/pro
 
 For optional paid challenge solving, create a Git-ignored project-root `.env` (mode `0600`) containing `TWOCAPTCHA_API_KEY=your-key`; `.env.example` is an empty template. Run the browser from that directory or configure an absolute `envFile` for an installed runtime. A key alone does not enable solving: explicit policy, ledger and per-call authorization remain required. Budget limits are reservation estimates, not a guaranteed provider charge ceiling. See [the adapter guide](docs/BROWSER-2CAPTCHA.md).
 
+For browser proxies, put one `HOST:PORT:USER:PASS` record per line in `~/.config/opencode/proxies.txt` and set the file's permissions to `0600`. In `prometheus-browser.json`, configure `"proxy": { "session": "main", "strategy": "round-robin" }`, then explicitly create that routing session. No `poolFile` setting, separate secrets directory, or per-proxy JSON credential files are required. Custom installations use `<config_dir>/proxies.txt`. Merely creating the file does not enable proxies. See [proxy setup, format, and recovery](docs/BROWSER-OPERATIONS.md#proxy-setup-and-session-lifecycle); [proxies.txt.example](proxies.txt.example) contains placeholders only.
+
 Browser changes in this checkout are review candidates, not an update to any existing active installation, which may still run older code. An isolated candidate installation reached `https://example.com` in the Phase C qualification; this does not qualify a real provider, proxy, or human desktop session. Those require their own prerequisites and explicit authorization. No retailer is required, and paid calls are never automatic.
 
 ```sh

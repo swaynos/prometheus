@@ -34,7 +34,7 @@ Writes to a session or verification key are serialized within the plugin instanc
 ## Candidate Manifest Limits
 
 - Includes tracked and untracked regular files and internal relative symlinks.
-- Excludes `.git`, `.opencode`, `node_modules`, `.env`, `.env.*`, and `.DS_Store`.
+- Excludes `.git`, `.opencode`, `node_modules`, `.env`, `.env.*`, `.DS_Store`, and credential-bearing `proxies.txt` files at every depth. Placeholder `proxies.txt.example` files remain included.
 - Rejects absolute or external symlinks, special files, and files with multiple hardlinks (`nlink > 1`).
 - Detects file modifications before acceptance and during later `status` checks. It does not isolate processes or block writes.
 

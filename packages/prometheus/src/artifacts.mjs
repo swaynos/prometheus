@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { canonical, hash, inside, requireThat } from './util.mjs';
 
-const excluded = name => ['.git', '.opencode', 'node_modules', '.DS_Store'].includes(name) || /^\.env(?:\.|$)/.test(name);
+const excluded = name => ['.git', '.opencode', 'node_modules', '.DS_Store', 'proxies.txt'].includes(name) || /^\.env(?:\.|$)/.test(name);
 
 export function manifest(directory, { beforeRead = () => {} } = {}) {
   directory = canonical(directory);
@@ -29,7 +29,7 @@ export function manifest(directory, { beforeRead = () => {} } = {}) {
     }
   }
   visit('');
-  return { id: hash(files), files, exclusions: ['.git', '.opencode', 'node_modules', '.env and .env.*', '.DS_Store'] };
+  return { id: hash(files), files, exclusions: ['.git', '.opencode', 'node_modules', '.env and .env.*', '.DS_Store', 'proxies.txt'] };
 }
 
 // Enumerate paths before reading file bytes so native read permission is checked first.

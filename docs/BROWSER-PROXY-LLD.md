@@ -1,12 +1,13 @@
 # Browser Proxy Pool: Low-Level Design
 
-**Status:** Implemented (`scripts/opencode-browser-sessions.mjs`, `scripts/browser-sessions.mjs`, `npm run browser:sessions`).
+**Status:** Implemented (`scripts/opencode-browser-proxy-list.mjs`, `scripts/opencode-browser-sessions.mjs`, `scripts/browser-sessions.mjs`, `npm run browser:sessions`).
 
 **Requirements:** [Browser Proxy Pool Specification](BROWSER-PROXY-SPEC.md). This document describes implementation details; the specification controls in case of conflict.
 
 ## 1. Current integration points
 
 - `scripts/opencode-browser-runtime.mjs` validates a strict configuration allowlist, builds launch/context options, and creates task contexts.
+- `scripts/opencode-browser-proxy-list.mjs` securely reads the default text file and parses private runtime entries, credentials, stable IDs, and redaction literals.
 - `scripts/opencode-playwright-mcp.mjs` lazily creates one task context in `ensureContext()`, clears it in `closeBrowser()`, exposes status, and manages saved-state hydration and transfer tools.
 - `scripts/opencode-browser-login.mjs` independently launches a headed persistent context or automatically selects CDP. It must receive the task's session assignment, not allocate one.
 - `scripts/opencode-browser-state.mjs` owns origin-scoped private authentication records. Its record name is not a browser-session name.
@@ -16,28 +17,32 @@ Preserve existing browser, authentication, and transfer interfaces and safeguard
 
 ## 2. Configuration and validation
 
-The top-level browser configuration accepts the following shape:
+The primary top-level browser configuration is:
 
 ```json
 {
   "channel": "chrome",
   "executionMode": "headless",
   "proxy": {
-    "session": "shopping",
-    "strategy": "round-robin",
-    "pool": [
-      { "id": "proxy-a", "server": "http://proxy-a.example:8000", "credentialsFile": "prometheus-proxy-secrets/proxy-a.json" },
-      { "id": "proxy-b", "server": "http://proxy-b.example:8000" }
-    ]
+    "session": "main",
+    "strategy": "round-robin"
   }
 }
 ```
 
-The optional credentials file contains `{ "username": "...", "password": "..." }`. This example contains placeholders, not credentials. Resolve credential paths under the private configuration directory; reject absolute paths, traversal, unsafe parent components, symlinks, nonregular files, unexpected ownership or permissions, and hard links. Open and validate files in a race-resistant manner and fail closed if the platform cannot establish the required properties. Never print file contents.
+Omitting `pool` selects `<config_dir>/proxies.txt` (normally `~/.config/opencode/proxies.txt`), with one `HOST:PORT:USER:PASS` record per line. There is no `poolFile` setting or required separate credential directory. Explicit `pool` arrays retain the legacy `{ id, server, credentialsFile? }` shape and take precedence without reading the default file. Explicit empty/invalid pools fail; they are not a fallback instruction.
 
-Validate nonempty unique IDs with a bounded safe-name grammar; require `strategy: "round-robin"`; accept only explicitly specified `http://host:port` endpoints. Reject userinfo, paths other than the empty/root form, query strings, fragments, invalid ports, and unsupported schemes. Canonicalize endpoints before comparing them. Reject `proxy` with `external-cdp` and reject unsupported engine/mode combinations instead of pretending the route is enforced. Validate without allocating a session or reading secrets unless launch requires them.
+`validateProxyConfig()` remains a static, non-reading operation. `resolveProxyConfig()` privately loads text entries when a lifecycle operation requires the pool. Resolved entries must never be fed back into browser configuration. Config copies share a process-private `WeakMap` redaction context; credentials and original-record/endpoint literals are retained only there and in private runtime entries, never as enumerable config properties. JSON and login IPC carry only source configuration.
 
-No `proxy` key means existing behavior. A present `proxy` requires a configuration directory and an already-created named session. Do not treat configuration-file errors or an absent registry as an instruction to connect directly.
+`readProxyList()` opens real ancestor directories with `O_DIRECTORY | O_NOFOLLOW`, holds their descriptors, and enforces trusted ownership and no untrusted write permissions. The config root is owned by the current user and may be `0755`; root-owned sticky temporary ancestors are allowed. Reject repository-shaped ancestors. Open the list with `O_NOFOLLOW | O_NONBLOCK`, require a current-user-owned single-link regular file with exact `0600` mode, and read at most 1 MiB plus one overflow byte. Recheck the file's identity, owner, mode, link count, size, modification/change times, and all held directory identities/modes before decoding. Unsupported platforms and unsafe files fail closed with fixed codes, never filesystem messages or file paths.
+
+`parseProxyList()` accepts strict UTF-8 with optional initial BOM, LF/CRLF, blank lines, and full-line `#` comments. Recognize bracketed IPv6 or an unbracketed hostname/IPv4, a decimal port `1..65535`, a nonempty colon-free username, and a nonempty password comprising the entire remainder. Preserve credential spaces, colons, `#`, and `@`; do not URL-decode. Reject control characters, malformed/empty records, duplicate endpoint/username identities, and more than 4096 entries. Parser errors expose only a fixed code and optional 1-based line number.
+
+Each text entry receives `file-` plus the first 32 hexadecimal characters of SHA-256 over `JSON.stringify([canonicalServer, username])`. Passwords and line numbers are excluded. Reordering or refreshing a password preserves identity; different usernames on one gateway remain distinct. Hashes are opaque change/identity keys, not a secrecy boundary. Explicitly migrating legacy hand-written IDs to these generated IDs requires session/cursor reconciliation; never silently rewrite the registry.
+
+Legacy credential JSON still contains `{ "username": "...", "password": "..." }`. Its existing relative-path, `0700` credential-parent, `0600` file, ownership, and link-safety checks remain unchanged. Unauthenticated proxies remain available through explicit JSON pools.
+
+Require `strategy: "round-robin"` and valid session names; legacy entries also require unique safe IDs and explicit `http://host:port` URLs. Reject unsupported protocols, embedded credentials, URL paths/query/fragment, external CDP, and non-Chromium profiles. No `proxy` key means existing non-proxy behavior, even when a list exists. A present `proxy` requires a config directory and explicitly created named session. Missing/invalid lists, configuration errors, or absent registries must never become direct-routing instructions.
 
 ## 3. Persistent registry
 
@@ -62,7 +67,7 @@ The private session module stores a registry beneath the configuration directory
 
 These are logical fields, not permission to expose a fingerprint or timestamps in public output. Store no credentials, cookies, endpoint URLs, or page data in the registry. A plain endpoint fingerprint is a change detector, not a secrecy boundary; protect the registry as private data.
 
-The cursor references a stable proxy ID rather than an array index. On creation or rotation, select `nextProxyId` and store the successor in the current pool order. If the cursor's ID was removed, fail with an actionable reconciliation error rather than guessing a successor. Pool reordering does not affect existing assignments; it affects subsequent successors after the current cursor is consumed. A new registry starts at the first configured proxy. An absent assigned ID or endpoint fingerprint mismatch blocks session launch. Credentials are deliberately excluded from the endpoint fingerprint so they can be updated independently.
+The cursor references a stable proxy ID rather than an array index. On creation or rotation, select `nextProxyId` and store the successor in the current pool order. If the cursor's ID was removed, fail with an actionable reconciliation error rather than guessing a successor. Pool reordering does not affect existing assignments; it affects subsequent successors after the current cursor is consumed. A new registry starts at the first configured proxy. An absent assigned ID or endpoint fingerprint mismatch blocks session launch. Credentials are excluded from the endpoint fingerprint; text-backed IDs separately include the username so password updates preserve identity but username changes require explicit reconciliation.
 
 Validate schema and names on every read. An invalid or corrupt registry stops operations; never auto-reset it. Use owner-only `0700` directories and `0600` files with safe ownership and link checks. Write a uniquely named same-directory temporary file, flush as appropriate, atomically rename, and sync the directory where supported. Reject unsafe existing targets.
 
@@ -100,17 +105,17 @@ Create reserves a proxy under the registry lock. Show/list return sanitized meta
 
 Rotation uses the global cursor, not a per-session successor, and may select the current proxy again (including in single-member pools). Generation and association-reset rules still apply. `reconcile-session <session> <proxy-id>` explicitly chooses a configured pool member without advancing the cursor. A changed ID or endpoint increments generation, clears associations by default, and warns when `--retain-associations` is used; unchanged reconciliation is a no-op.
 
-`diagnoseSessions()` implements `doctor` without calling the pruning ownership inspectors or acquiring the registry lock. It uses strict file readers and liveness classification, reports only fixed codes and sanitized IDs/counts, and never repairs files. Credential values are validated privately and discarded. Active locks and dead records produce warnings; unsafe/corrupt state, ambiguous ownership, missing configured sessions, removed IDs, endpoint drift, and invalid credentials produce errors. CLI status is `1` for errors and `0` otherwise. Concurrent activity can invalidate the snapshot immediately; `ok` is not permission to rotate or proof of routing. Unlike `doctor`, `show` may prune conclusively dead ownership records as part of inspection; neither command changes the registry cursor.
+`diagnoseSessions()` implements `doctor` without calling the pruning ownership inspectors or acquiring the registry lock. It uses strict file readers and liveness classification, reports only fixed codes and sanitized IDs/counts, and never repairs files. Credential values remain private and are excluded from reports. Text-load failures return a failing report with `proxy-list-*` issue codes and optional line numbers; no registry operation is attempted after an invalid list. Valid-file reports list opaque proxy IDs in source order. Active locks and dead records produce warnings; unsafe/corrupt state, ambiguous ownership, missing configured sessions, removed IDs, endpoint drift, and invalid credentials produce errors. CLI status is `1` for errors and `0` otherwise. Concurrent activity can invalidate the snapshot immediately; `ok` is not permission to rotate or proof of routing. Unlike `doctor`, `show` may prune conclusively dead ownership records as part of inspection; neither command changes the registry cursor.
 
 ## 6. Launch, login, and hydration
 
-1. Task startup validates configuration, acquires ownership, resolves the stored assignment against the configured pool, and reads credentials privately.
+1. Task startup statically validates configuration, resolves the pool privately, and acquires ownership against the stored assignment. Text credentials come from that validated snapshot; legacy credentials are read outside the registry lock.
 2. Start an owner-local HTTP relay on `127.0.0.1` that injects upstream proxy authentication. Playwright receives only the relay URL in its launch proxy option, not upstream credentials. Keep upstream connection details out of `browserRuntimeInfo`, `browser_status`, serializable configuration, generated launch summaries, and errors.
 3. Create the browser and context. On failure, close partial resources and release ownership without changing the committed assignment.
 4. The login helper accepts a distinct browser-session selector and authenticated handoff, validates generation, resolves the same proxy, and uses the managed persistent-context path. Disable automatic CDP selection when proxying. Reject explicit external CDP with proxy configuration.
 5. Bind login capture to the session only after successful capture. Retain existing user approval, scoped state capture, private file handling, and task-context authentication verification.
 6. In the MCP hydration path, filter candidates to the current generation's associated authentication records before applying existing origin checks. No global scan of unrelated records for proxy-enabled sessions. Non-proxy behavior remains unchanged.
-7. On close, release the ownership only after cleanup. Reopening resolves the same registry assignment.
+7. On close, release the ownership only after cleanup. Reopening resolves the same registry assignment. Text-file edits do not hot-reconfigure an existing relay. Lifecycle/generation checks reread the file and reject removed identities or invalid edits; close task/helper contexts before identity changes.
 
 Do not rely on the currently generated installer probe's `JSON.stringify(config)` for secrets. The probe must not resolve credentials, create sessions, advance the cursor, or leak secrets. Separate static configuration validation from any explicitly requested proxy-enabled qualification.
 
@@ -128,13 +133,15 @@ Add local fixtures for an authenticated HTTP forward proxy, CONNECT tunnels, des
 
 Required coverage:
 
-- Config schema, URL validation, credential safety, secret redaction, and compatibility without proxies.
+- Config schema, strict text parsing/limits/line diagnostics, URL validation, secure file reads/path-swap rejection, credential safety, secret redaction, and compatibility with legacy JSON pools and without proxies.
 - Cursor order, wraparound, restart persistence, pool reorder/removal/endpoint change, concurrent allocations, interrupted writes, corrupt registry, and stale/ambiguous locks.
 - Generation and ownership races, active rotation rejection, login handoff, and helper surviving owner failure.
 - Login and later browsing through the same proxy; explicit auth bindings and rotation behavior; origin scoping and verification remain intact.
 - HTTP and HTTPS CONNECT, credentials not forwarded to destinations, tabs/frames/popups, uploads, download and media paths, and proxy-down direct-connection checks.
 - 407 and target denial classification; interrupted non-idempotent actions are not replayed.
 - Staged install/update inventory, read-only installer probes, no rotation on status, and existing transfer and authentication regressions.
+
+`tests/integration/browser_proxy_list.test.mjs` covers the text parser, bounded secure reads (including file/directory swaps), stable identities, read-only diagnostics, source precedence, fresh-process CLI use, invalidated handoffs, and installer privacy. `browser_proxy.test.mjs` runs the same HTTP/CONNECT/transfer/login fixture scenarios for both JSON and text sources, removing per-proxy JSON credential files in the text variants. `packages/prometheus/test/artifacts.test.mjs` verifies that real `proxies.txt` files are excluded from candidate enumeration/manifests while the placeholder example remains visible.
 
 Run `npm test`, `npm run test:controller`, and `PROMETHEUS_TEST_BROWSER_CHANNEL=chrome npm test`. Qualify Linux headless and virtual-display, plus macOS when available. Document engine and Playwright/browser versions; unavailable configurations are unverified. Include explicit provider-side rotating-IP limitations in operational guidance.
 

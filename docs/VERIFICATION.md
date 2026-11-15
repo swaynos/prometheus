@@ -46,4 +46,4 @@ Scripted tests prove integration mechanics, not model judgment. For live-model c
 
 - Native permissions and file hashes are not an OS sandbox.
 - Tool reference checks prove that a tool ran, not that the evaluator's reasoning is complete.
-- Excluded paths (`.git`, `.opencode`, `node_modules`, `.env*`, `.DS_Store`) and external systems require separate evidence.
+- Excluded paths (`.git`, `.opencode`, `node_modules`, `.env*`, `.DS_Store`, and credential-bearing `proxies.txt` files) and external systems require separate evidence. Placeholder `proxies.txt.example` files remain included.

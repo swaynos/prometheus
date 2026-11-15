@@ -30,6 +30,11 @@ function usage() {
     "  rotate [session] [--session <name>] [--retain-associations]",
     "  reconcile-cursor <proxy-id> [--proxy-id <id>]",
     "  reconcile-session [session] [proxy-id] [--session <name>] [--proxy-id <id>] [--retain-associations]",
+    "",
+    "All commands accept --config-dir <dir> (or PROMETHEUS_CONFIG_DIR).",
+    "Configure proxy.session and strategy: round-robin in prometheus-browser.json.",
+    "Omit proxy.pool to load <config-dir>/proxies.txt: HOST:PORT:USER:PASS per line.",
+    "The list must be a private 0600 file outside Git repositories.",
   ].join("\n");
 }
 

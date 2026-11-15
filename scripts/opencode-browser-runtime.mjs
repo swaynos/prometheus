@@ -145,6 +145,8 @@ export function validateBrowserConfig(config) {
     ) {
       throw new Error("proxy cannot be combined with proxy launchOptions.args flags");
     }
+    // Static validation never opens proxies.txt. File-backed endpoints and
+    // credentials are resolved privately when acquiring a session.
     proxy = validateProxyConfig(config.proxy);
   }
   return {

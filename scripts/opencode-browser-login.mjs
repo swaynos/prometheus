@@ -261,6 +261,8 @@ export async function startLogin(opts, dependencies = {}) {
     child.once("error", () => finish(new LoginError("login worker could not start")));
     child.once("exit", () => finish(new LoginError("login worker exited before opening a window")));
     child.once("message", result => finish(result.error ? new LoginError(sanitizePoolProxyError(result.error, opts.browser)) : null, result));
+    // Only source configuration crosses IPC; the worker resolves proxies.txt
+    // privately while joining the pinned session, not in serialized options.
     child.send(workerOpts);
   });
 }

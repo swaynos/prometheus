@@ -16,6 +16,7 @@ When using `prometheus-browser`, read `../docs/RESOURCE-SELECTION.md` relative t
 ## Shared safeguards
 
 - Use a dedicated automation profile. Keep saved authentication outside repositories, owner-only (mode 0600), and scoped to approved origins. Never expose credentials or authentication state in model context, logs, screenshots, or recordings.
+- The default proxy list is `<config_dir>/proxies.txt` (normally `~/.config/opencode/proxies.txt`), mode 0600, with one `HOST:PORT:USER:PASS` per line. Read proxy setup in the browser reference; never display its contents. Proxying requires explicit configuration/session creation, not just a file's existence. Never rotate or fall back to direct routing after denial.
 - Pause agent actions during human control; inspect the page on handback. Do not poll for login completion or infer it from a redirect alone; verify task access.
 - Recording requires explicit intent, capture scope, local destination, and a stop procedure. Exclude authentication and verify the saved artifact before success.
 - Use visible, enabled controls; verify entered values and attachment acceptance.

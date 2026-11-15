@@ -38,6 +38,7 @@ import {
 import { loadStateForOrigin, saveState, statMetadata } from "../../scripts/opencode-browser-state.mjs";
 import * as login from "../../scripts/opencode-browser-login.mjs";
 import { profile } from "../../scripts/browser-profile.mjs";
+import { readProxyList } from "../../scripts/opencode-browser-proxy-list.mjs";
 import { repoRoot, spawnMcpClient } from "./helpers.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -72,6 +73,25 @@ function writeBrowserSettings(configDir, settings) {
   fs.writeFileSync(path.join(configDir, "prometheus-browser.json"), JSON.stringify(settings, null, 2) + "\n", {
     mode: 0o600,
   });
+}
+
+function configurePoolSource(configDir, config, source) {
+  const pool = config.proxy.pool;
+  if (source === "json") return Object.fromEntries(pool.map(entry => [entry.id, entry.id]));
+  const lines = pool.map(entry => {
+    const credentials = entry.credentialsFile
+      ? readProxyCredentials(configDir, entry.credentialsFile)
+      : { username: "unused-user", password: "unused-password" };
+    return `${entry.server.replace(/^http:\/\//, "")}:${credentials.username}:${credentials.password}`;
+  });
+  fs.writeFileSync(path.join(configDir, "proxies.txt"), lines.join("\n") + "\n", { mode: 0o600 });
+  // The text-file variants must work without per-proxy credential JSON files.
+  for (const entry of pool) {
+    if (entry.credentialsFile) fs.unlinkSync(path.join(configDir, entry.credentialsFile));
+  }
+  delete config.proxy.pool;
+  const entries = readProxyList(configDir);
+  return Object.fromEntries(pool.map((entry, index) => [entry.id, entries[index].id]));
 }
 
 function createAuthProxyFixture(t, opts = {}) {
@@ -568,7 +588,8 @@ test("session ownership, generation checks, active rotation rejection, login han
   assert.ok(rotated2.warnings?.length > 0);
 });
 
-test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydration filtering, 407, proxy-down, and non-replay", async (t) => {
+for (const poolSource of ["json", "text"]) {
+test(`${poolSource}: end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydration filtering, 407, proxy-down, and non-replay`, async (t) => {
   const dir = makeConfigDir(t);
   const proxyCreds = { username: "proxyAuthUser77", password: "ProxyAuthPassword#77" };
   const credRel = "prometheus-proxy-secrets/proxy-a.json";
@@ -680,6 +701,7 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
       ],
     },
   };
+  const proxyIds = configurePoolSource(dir, cfg, poolSource);
   writeBrowserSettings(dir, cfg);
   await createSession(dir, cfg);
 
@@ -706,7 +728,7 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
     enabled: true,
     session: "shopping",
     generation: 1,
-    proxyId: "proxy-a",
+    proxyId: proxyIds["proxy-a"],
     routing: "configured",
   });
   assert.doesNotMatch(JSON.stringify(preStatus), /proxyAuthUser77|ProxyAuthPassword|credentialsFile|endpointFingerprint|18202/);
@@ -735,7 +757,7 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
   });
   assert.equal((await restarted.call("browser_navigate", { url: `${targetOrigin}/after-restart` })).isError, undefined);
   assert.deepEqual(JSON.parse(restarted.textOf(await restarted.call("browser_status"))).proxy, preStatus.proxy);
-  assert.equal(listSessions(dir).nextProxyId, "proxy-b");
+  assert.equal(listSessions(dir).nextProxyId, proxyIds["proxy-b"]);
   assert.ok(proxyA.httpRequests.some((r) => r.url.endsWith("/after-restart")));
   assert.equal(proxyB.httpRequests.length + proxyB.connectRequests.length, 0);
   mcp = restarted;
@@ -792,7 +814,7 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
   const forbidden = await mcp.call("browser_navigate", { url: `${targetOrigin}/forbidden` });
   assert.match(mcp.textOf(forbidden), /access denied/i);
   assert.deepEqual(JSON.parse(mcp.textOf(await mcp.call("browser_status"))).proxy, preStatus.proxy);
-  assert.equal(listSessions(dir).nextProxyId, "proxy-b");
+  assert.equal(listSessions(dir).nextProxyId, proxyIds["proxy-b"]);
   assert.equal(proxyB.httpRequests.length + proxyB.connectRequests.length, 0);
   assert.ok(proxyA.httpRequests.length > 0);
   assert.ok(proxyA.httpRequests.every((r) => r.proxyAuth !== null));
@@ -810,9 +832,9 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
   assert.doesNotMatch(err407, /proxyAuthUser77|ProxyAuthPassword/);
   assert.equal(err407.includes(proxyAUrl), false);
   assert.equal(showSession(dir, "shopping").generation, 1);
-  assert.equal(showSession(dir, "shopping").proxyId, "proxy-a");
+  assert.equal(showSession(dir, "shopping").proxyId, proxyIds["proxy-a"]);
   assert.equal(targetReceivedAuth.some((r) => r.url === "/after-407"), false);
-  assert.equal(listSessions(dir).nextProxyId, "proxy-b");
+  assert.equal(listSessions(dir).nextProxyId, proxyIds["proxy-b"]);
   assert.equal(proxyB.httpRequests.length + proxyB.connectRequests.length, 0);
   const tab407 = await mcp.call("browser_tab_new", { url: `${targetOrigin}/tab-after-407` });
   assert.equal(tab407.isError, true);
@@ -820,7 +842,7 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
   assert.doesNotMatch(mcp.textOf(tab407), /access denied|proxyAuthUser77|ProxyAuthPassword/i);
   assert.equal(targetReceivedAuth.some((r) => r.url === "/tab-after-407"), false);
   assert.equal(showSession(dir, "shopping").generation, 1);
-  assert.equal(showSession(dir, "shopping").proxyId, "proxy-a");
+  assert.equal(showSession(dir, "shopping").proxyId, proxyIds["proxy-a"]);
   assert.equal(proxyB.httpRequests.length + proxyB.connectRequests.length, 0);
   proxyA.setForce407(false);
 
@@ -843,13 +865,13 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
   assert.equal(downNav.isError, true);
   assert.match(mcp.textOf(downNav), /proxy connection failed/i);
   assert.equal(directHitsWhenProxyDown, 0, "proxy failure MUST NOT fall back to a direct connection");
-  assert.equal(showSession(dir, "shopping").proxyId, "proxy-a");
-  assert.equal(listSessions(dir).nextProxyId, "proxy-b");
+  assert.equal(showSession(dir, "shopping").proxyId, proxyIds["proxy-a"]);
+  assert.equal(listSessions(dir).nextProxyId, proxyIds["proxy-b"]);
   assert.equal(proxyB.httpRequests.length + proxyB.connectRequests.length, 0);
   assert.doesNotMatch(mcp.errors(), /proxyAuthUser77|ProxyAuthPassword/);
 });
 
-test("HTTPS CONNECT tunnel routes through authenticated proxy without leaking proxy credentials on target 401, and classifies CONNECT 407", async (t) => {
+test(`${poolSource}: HTTPS CONNECT tunnel routes through authenticated proxy without leaking proxy credentials on target 401, and classifies CONNECT 407`, async (t) => {
   const dir = makeConfigDir(t);
   const certInfo = generateSelfSignedCert(t, dir);
   const proxyCreds = { username: "connectUser88", password: "ConnectPassword#88" };
@@ -890,6 +912,7 @@ test("HTTPS CONNECT tunnel routes through authenticated proxy without leaking pr
       pool: [{ id: "proxy-tls", server: proxyUrl, credentialsFile: credRel }],
     },
   };
+  configurePoolSource(dir, cfg, poolSource);
   await createSession(dir, cfg);
 
   // Test-only SPKI pin allows strict Chromium TLS verification of our ephemeral self-signed localhost fixture.
@@ -945,7 +968,7 @@ test("HTTPS CONNECT tunnel routes through authenticated proxy without leaking pr
   assert.equal(directHitsWhen407, 0);
 });
 
-test("hydration filters strictly by session generation and login helper binds after save without leaking or rotating", async (t) => {
+test(`${poolSource}: hydration filters strictly by session generation and login helper binds after save without leaking or rotating`, async (t) => {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "px-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const certInfo = generateSelfSignedCert(t, dir);
@@ -989,6 +1012,7 @@ test("hydration filters strictly by session generation and login helper binds af
       ],
     },
   };
+  const proxyIds = configurePoolSource(dir, cfg, poolSource);
   writeBrowserSettings(dir, cfg);
   await createSession(dir, cfg);
 
@@ -1051,9 +1075,9 @@ test("hydration filters strictly by session generation and login helper binds af
   assert.equal(started.status, "awaiting-user");
 
   // Confirm proxy saw the login navigation through proxy-a without consuming cursor (proxyId still proxy-a, nextProxyId still proxy-b).
-  assert.equal(showSession(dir, "acct-session").proxyId, "proxy-a");
+  assert.equal(showSession(dir, "acct-session").proxyId, proxyIds["proxy-a"]);
   assert.equal(showSession(dir, "acct-session").generation, issued.generation);
-  assert.equal(listSessions(dir).nextProxyId, "proxy-b");
+  assert.equal(listSessions(dir).nextProxyId, proxyIds["proxy-b"]);
   assert.ok(proxyA.connectRequests.length > 0, "login navigation must traverse the pinned proxy");
 
   // Rotation is refused while login window is awaiting user.
@@ -1065,8 +1089,14 @@ test("hydration filters strictly by session generation and login helper binds af
   assert.deepEqual(showSession(dir, "acct-session").authRecords, ["a1"]);
 
   // Replace proxy credentials on disk WITHOUT rotation; next task browser authenticates using updated creds on gen 1.
-  writeSecretFile(dir, credRel, { username: "updatedUser66", password: "UpdatedPassword#66" });
-  proxyA.setCredentials("updatedUser66", "UpdatedPassword#66");
+  const updatedUser = poolSource === "text" ? proxyCreds.username : "updatedUser66";
+  if (poolSource === "text") {
+    const file = path.join(dir, "proxies.txt");
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(proxyCreds.password, "UpdatedPassword#66"));
+  } else {
+    writeSecretFile(dir, credRel, { username: updatedUser, password: "UpdatedPassword#66" });
+  }
+  proxyA.setCredentials(updatedUser, "UpdatedPassword#66");
   const spkiTaskChromium = Object.create(chromium);
   spkiTaskChromium.launch = (opts) =>
     chromium.launch({
@@ -1076,7 +1106,7 @@ test("hydration filters strictly by session generation and login helper binds af
   const reopened = await createTaskContext(spkiTaskChromium, cfg, undefined, { configDir: dir });
   try {
     assert.equal(reopened.proxySession.generation, 1);
-    assert.equal(reopened.proxySession.proxyId, "proxy-a");
+    assert.equal(reopened.proxySession.proxyId, proxyIds["proxy-a"]);
     const allowed = getSessionAuthRecords(dir, "acct-session").authRecords;
     assert.deepEqual(allowed, ["a1"]);
     const loaded = loadStateForOrigin({ configDir: dir, name: allowed[0], origin: httpsOrigin });
@@ -1097,6 +1127,7 @@ test("hydration filters strictly by session generation and login helper binds af
   assert.ok(statMetadata(dir, "a1"));
   assert.ok(statMetadata(dir, "unbound-same-origin"));
 });
+}
 
 test("staged install and probe ignore proxy secrets/allocation and block unsafe cutover", async (t) => {
   const dir = makeConfigDir(t);
@@ -1150,7 +1181,7 @@ test("staged install and probe ignore proxy secrets/allocation and block unsafe 
   writeBrowserSettings(cleanRoot, {
     channel: testChannel,
     executionMode: "headless",
-    proxy: { session: "real-probe-sess", strategy: "round-robin", pool },
+    proxy: { session: "real-probe-sess", strategy: "round-robin" },
   });
   await profile("install", {
     root: cleanRoot,
@@ -1160,12 +1191,15 @@ test("staged install and probe ignore proxy secrets/allocation and block unsafe 
   const installedMcp = path.join(cleanRoot, "prometheus-browser/opencode-playwright-mcp.mjs");
   assert.equal(fs.existsSync(path.join(cleanRoot, "prometheus-browser/opencode-browser-sessions.mjs")), true);
   assert.equal(fs.existsSync(path.join(cleanRoot, "prometheus-browser/browser-sessions.mjs")), true);
+  assert.equal(fs.existsSync(path.join(cleanRoot, "prometheus-browser/opencode-browser-proxy-list.mjs")), true);
+  assert.equal(fs.existsSync(path.join(cleanRoot, "prometheus-browser/proxies.txt.example")), true);
 
   // Verify installed MCP server lists no leaked proxy secrets/URLs on browser_status.
+  fs.writeFileSync(path.join(cleanRoot, "proxies.txt"), "127.0.0.1:18444:stageUser:StagePassword#9\n", { mode: 0o600 });
   await createSession(cleanRoot, {
     channel: testChannel,
     executionMode: "headless",
-    proxy: { session: "real-probe-sess", strategy: "round-robin", pool },
+    proxy: { session: "real-probe-sess", strategy: "round-robin" },
   });
   const mcp = spawnMcpClient({ PROMETHEUS_CONFIG_DIR: cleanRoot }, { server: installedMcp, captureStderr: true });
   t.after(async () => { await mcp.close().catch(() => {}); });

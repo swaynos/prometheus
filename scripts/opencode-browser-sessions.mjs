@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { assertValidName, statMetadata } from "./opencode-browser-state.mjs";
+import { ProxyListError, readProxyList } from "./opencode-browser-proxy-list.mjs";
 
 const { constants } = fs;
 
@@ -33,6 +34,16 @@ const SESSION_RECORD_KEYS = new Set([
 ]);
 
 const activeLocalTokens = new Set();
+// Share private redaction state across validated config copies, never across IPC
+// or JSON serialization. The source proxy object owns its lifetime.
+const proxySecrets = new WeakMap();
+
+function shareProxySecrets(source, selected) {
+  const secrets = proxySecrets.get(source) ?? new Map();
+  proxySecrets.set(source, secrets);
+  proxySecrets.set(selected, secrets);
+  return selected;
+}
 
 export class BrowserSessionError extends Error {
   constructor(message) {
@@ -156,6 +167,9 @@ export function validateProxyConfig(rawProxy) {
   if (rawProxy.strategy !== "round-robin") {
     throw new BrowserSessionError("browser.proxy.strategy must be 'round-robin'");
   }
+  if (!Object.hasOwn(rawProxy, "pool")) {
+    return shareProxySecrets(rawProxy, { session: rawProxy.session, strategy: "round-robin" });
+  }
   if (!Array.isArray(rawProxy.pool) || rawProxy.pool.length === 0) {
     throw new BrowserSessionError("browser.proxy.pool must be a non-empty array");
   }
@@ -186,11 +200,23 @@ export function validateProxyConfig(rawProxy) {
       ...(credentialsFile !== undefined ? { credentialsFile } : {}),
     };
   });
-  return {
+  return shareProxySecrets(rawProxy, {
     session: rawProxy.session,
     strategy: "round-robin",
     pool,
-  };
+  });
+}
+
+function resolveProxyConfig(configDir, rawProxy) {
+  const proxy = validateProxyConfig(rawProxy);
+  if (proxy.pool) return proxy;
+  const pool = readProxyList(configDir);
+  const secrets = proxySecrets.get(proxy);
+  for (const entry of pool) {
+    const { username, password } = entry.credentials;
+    secrets.set(JSON.stringify([entry.server, username, password]), entry);
+  }
+  return { ...proxy, pool };
 }
 
 function escapeRegExp(value) {
@@ -259,7 +285,13 @@ export function sanitizePoolProxyError(error, config, credentials) {
   const literals = Array.isArray(config?.proxy?.pool)
     ? config.proxy.pool.map((entry) => entry.credentialsFile).filter(Boolean)
     : [];
-  return redactSecrets(error, { urls, literals, credentials });
+  literals.push("proxies.txt");
+  const privateEntries = proxySecrets.get(config?.proxy)?.values() ?? [];
+  let text = redactSecrets(error, { urls, literals, credentials });
+  for (const entry of privateEntries) {
+    text = redactSecrets(text, { urls: [entry.server], literals: entry.redactionLiterals, credentials: entry.credentials });
+  }
+  return text;
 }
 
 function openDirNoFollow(dirPath) {
@@ -1271,7 +1303,7 @@ function verifyHandoffSignature(key, payload) {
 }
 
 export async function createSession(configDir, rawConfig, { session } = {}) {
-  const proxy = validateProxyConfig(rawConfig?.proxy);
+  const proxy = resolveProxyConfig(configDir, rawConfig?.proxy);
   const targetSession = session ?? proxy.session;
   try {
     assertValidName(targetSession);
@@ -1373,7 +1405,7 @@ function diagnoseSessionOwners(layout, session, generation) {
 }
 
 export function diagnoseSessions(configDir, rawConfig) {
-  const proxy = validateProxyConfig(rawConfig?.proxy);
+  let proxy = validateProxyConfig(rawConfig?.proxy);
   const issues = [];
   const addIssue = (code, details = {}, severity = "error") => issues.push({ code, severity, ...details });
   const result = {
@@ -1386,10 +1418,17 @@ export function diagnoseSessions(configDir, rawConfig) {
     sessions: [],
     issues,
   };
+  try {
+    proxy = resolveProxyConfig(configDir, rawConfig?.proxy);
+  } catch (error) {
+    addIssue(error instanceof ProxyListError ? error.code : "proxy-list-invalid",
+      error instanceof ProxyListError && error.line !== undefined ? { line: error.line } : {});
+    return { ...result, ok: false };
+  }
 
   // Read and validate credentials locally, but never retain them in the report.
   for (const entry of proxy.pool) {
-    let credentials = "not-required";
+    let credentials = entry.credentials ? "valid" : "not-required";
     if (entry.credentialsFile) {
       try {
         readProxyCredentials(configDir, entry.credentialsFile);
@@ -1527,7 +1566,7 @@ function purgePendingSessionHandoffs(layout, sessionName) {
 }
 
 export async function rotateSession(configDir, rawConfig, { session, retainAssociations = false } = {}) {
-  const proxy = validateProxyConfig(rawConfig?.proxy);
+  const proxy = resolveProxyConfig(configDir, rawConfig?.proxy);
   const targetSession = session ?? proxy.session;
   try {
     assertValidName(targetSession);
@@ -1564,7 +1603,7 @@ export async function rotateSession(configDir, rawConfig, { session, retainAssoc
 }
 
 export async function reconcileCursor(configDir, rawConfig, { nextProxyId }) {
-  const proxy = validateProxyConfig(rawConfig?.proxy);
+  const proxy = resolveProxyConfig(configDir, rawConfig?.proxy);
   try {
     assertValidName(nextProxyId);
   } catch {
@@ -1583,7 +1622,7 @@ export async function reconcileCursor(configDir, rawConfig, { nextProxyId }) {
 }
 
 export async function reconcileSession(configDir, rawConfig, { session, proxyId, retainAssociations = false } = {}) {
-  const proxy = validateProxyConfig(rawConfig?.proxy);
+  const proxy = resolveProxyConfig(configDir, rawConfig?.proxy);
   const targetSession = session ?? proxy.session;
   try {
     assertValidName(targetSession);
@@ -1648,7 +1687,7 @@ function requirePinnedSessionLocked(layout, proxy) {
 }
 
 export async function acquireTaskSession(configDir, rawConfig) {
-  const proxy = validateProxyConfig(rawConfig?.proxy);
+  const proxy = resolveProxyConfig(configDir, rawConfig?.proxy);
   const pinned = await withRegistryLock(configDir, (layout) => {
     const { record, poolEntry } = requirePinnedSessionLocked(layout, proxy);
     const { paths } = inspectSessionOwners(layout, proxy.session, {
@@ -1681,7 +1720,7 @@ export async function acquireTaskSession(configDir, rawConfig) {
   try {
     const credentials = pinned.poolEntry.credentialsFile
       ? readProxyCredentials(configDir, pinned.poolEntry.credentialsFile)
-      : null;
+      : pinned.poolEntry.credentials ?? null;
     return {
       session: pinned.session,
       generation: pinned.generation,
@@ -1701,7 +1740,7 @@ export async function acquireTaskSession(configDir, rawConfig) {
 }
 
 export function verifySessionGeneration(configDir, rawConfig, expectedGeneration) {
-  const proxy = validateProxyConfig(rawConfig?.proxy);
+  const proxy = resolveProxyConfig(configDir, rawConfig?.proxy);
   const layout = ensureSessionsLayout(configDir, { create: false });
   const { exists, registry } = readRegistryStrict(layout.registryPath);
   const record = exists ? registry.sessions[proxy.session] : null;
@@ -1726,7 +1765,7 @@ export function verifyTaskSessionOwner(configDir, rawConfig, expectedGeneration,
 }
 
 export async function issueLoginHandoff(configDir, rawConfig, { session, expectedOwnerId, expectedGeneration, ttlMs = DEFAULT_HANDOFF_TTL_MS } = {}) {
-  const proxy = validateProxyConfig(rawConfig?.proxy);
+  const proxy = resolveProxyConfig(configDir, rawConfig?.proxy);
   if (session && session !== proxy.session) {
     throw new BrowserSessionError(`login session '${session}' does not match configured proxy.session '${proxy.session}'`);
   }
@@ -1783,7 +1822,7 @@ export async function issueLoginHandoff(configDir, rawConfig, { session, expecte
 }
 
 export async function joinLoginHelper(configDir, rawConfig, { session, handoffId }) {
-  const proxy = validateProxyConfig(rawConfig?.proxy);
+  const proxy = resolveProxyConfig(configDir, rawConfig?.proxy);
   if (session !== proxy.session) {
     throw new BrowserSessionError(`login helper session '${session}' does not match configured proxy.session '${proxy.session}'`);
   }
@@ -1878,7 +1917,7 @@ export async function joinLoginHelper(configDir, rawConfig, { session, handoffId
   try {
     const credentials = joined.poolEntry.credentialsFile
       ? readProxyCredentials(configDir, joined.poolEntry.credentialsFile)
-      : null;
+      : joined.poolEntry.credentials ?? null;
     return {
       session: joined.session,
       generation: joined.generation,

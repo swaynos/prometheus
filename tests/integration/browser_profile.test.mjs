@@ -13,7 +13,7 @@ import { profile } from '../../scripts/browser-profile.mjs';
 
 const repo = path.resolve(import.meta.dirname, '../..');
 const moduleURL = pathToFileURL(path.join(repo, 'scripts/browser-profile.mjs')).href;
-const runtimeNames = ['state', 'runtime', 'service', 'login', 'humanize', 'sessions', '2captcha', 'challenge', 'budget'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs', 'browser-profiles.mjs', 'browser-sessions.mjs', 'browser-budget.mjs');
+const runtimeNames = ['state', 'runtime', 'service', 'login', 'humanize', 'sessions', 'proxy-list', '2captcha', 'challenge', 'budget'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs', 'browser-profiles.mjs', 'browser-sessions.mjs', 'browser-budget.mjs');
 const oldName = 'cuddly-winner-browser';
 const newName = 'prometheus-browser';
 function fixture(t) {
@@ -41,7 +41,7 @@ function legacy(f, extras = {}) {
 }
 function newerSource(f) {
   const sourceRoot = path.join(f.directory, 'source');
-  for (const relative of [...runtimeNames.map(x => `scripts/${x}`), 'rules/resource-selection.md', 'docs/RESOURCE-SELECTION.md', 'docs/BROWSER-OPERATIONS.md', 'docs/BROWSER-2CAPTCHA.md', 'docs/BROWSER-SHOPPING-WORKFLOW.md', '.env.example', 'package.json', 'package-lock.json']) {
+  for (const relative of [...runtimeNames.map(x => `scripts/${x}`), 'rules/resource-selection.md', 'docs/RESOURCE-SELECTION.md', 'docs/BROWSER-OPERATIONS.md', 'docs/BROWSER-2CAPTCHA.md', 'docs/BROWSER-SHOPPING-WORKFLOW.md', '.env.example', 'proxies.txt.example', 'package.json', 'package-lock.json']) {
     write(path.join(sourceRoot, relative), fs.readFileSync(path.join(repo, relative), 'utf8'));
   }
   fs.appendFileSync(path.join(sourceRoot, 'scripts/opencode-browser-service.mjs'), '\n// New source revision.\n');
@@ -68,6 +68,8 @@ test('fresh install owns only its runtime, V2 registration, rule, and human-invo
   assert.equal(fs.existsSync(path.join(f.runtime, 'docs/BROWSER-OPERATIONS.md')), true);
   assert.equal(fs.readFileSync(path.join(f.runtime, '.env.example'), 'utf8'), 'TWOCAPTCHA_API_KEY=\n');
   assert.equal(fs.existsSync(path.join(f.runtime, '.env')), false);
+  assert.equal(fs.existsSync(path.join(f.runtime, 'proxies.txt')), false);
+  assert.equal(fs.readFileSync(path.join(f.runtime, 'proxies.txt.example'), 'utf8'), fs.readFileSync(path.join(repo, 'proxies.txt.example'), 'utf8'));
   assert.equal(fs.readFileSync(path.join(f.runtime, 'docs/BROWSER-2CAPTCHA.md'), 'utf8'), fs.readFileSync(path.join(repo, 'docs/BROWSER-2CAPTCHA.md'), 'utf8'));
   for (const removed of ['opencode-browser-cloudscraper.mjs', 'opencode-browser-cloudscraper.py', 'docs/BROWSER-CLOUDSCRAPER.md']) {
     assert.equal(fs.existsSync(path.join(f.runtime, removed)), false);

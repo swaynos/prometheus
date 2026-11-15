@@ -22,6 +22,6 @@ The browser runtime is separate from goal execution and installs under `<config_
 | [Browser reference](RESOURCE-SELECTION.md) | Shared settings, profiles, login handoff, file transfers, and failure handling. |
 | [Shopping workflow](BROWSER-SHOPPING-WORKFLOW.md) | Product, availability, cart verification, and manual handoff limitations. |
 | [2captcha policy and accounting](BROWSER-2CAPTCHA.md) | Explicit paid-solve authorization, private ledger, and reconciliation. |
-| [Operations guide](BROWSER-OPERATIONS.md) | Installation, migration, updates, rollback, and verification procedures. |
-| [Proxy pool specification](BROWSER-PROXY-SPEC.md) | Implemented persistent sessions, proxy rotation, safety, and acceptance criteria; Linux headless and Xvfb remain unverified. |
-| [Proxy pool low-level design](BROWSER-PROXY-LLD.md) | Implemented storage, lifecycle, routing, integration, and test design; see specification for qualification limits. |
+| [Operations guide](BROWSER-OPERATIONS.md) | Installation, `proxies.txt` setup, migration, updates, rollback, and verification procedures. |
+| [Proxy pool specification](BROWSER-PROXY-SPEC.md) | Text-file proxy pools, persistent sessions, rotation, safety, and acceptance criteria; Linux headless and Xvfb remain unverified. |
+| [Proxy pool low-level design](BROWSER-PROXY-LLD.md) | Secure text parsing, stable identities, storage, lifecycle, routing, integration, and tests; see specification for qualification limits. |
