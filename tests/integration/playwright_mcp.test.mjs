@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { spawnMcpClient as client } from "./helpers.mjs";
 
 function fixtureServer() {
@@ -141,9 +141,31 @@ for (const channel of channels) {
       assert.equal(evidence.contextOptions.viewport.height, 1024);
       assert.match(evidence.contextOptions.userAgent, /^Mozilla\/5\.0/);
       assert.doesNotMatch(evidence.contextOptions.userAgent, /HeadlessChrome/);
+      if (["default", "chromium"].includes(channel)) {
+        assert.equal(evidence.browserInstall.installed, true);
+        assert.deepEqual(evidence.browserInstall.browsers.map(b => b.name), channel === "default" ? ["chromium-headless-shell", "chromium"] : ["chromium"]);
+      } else {
+        assert.equal(evidence.browserInstall, null);
+      }
     } finally { await c.call("browser_close"); c.close(); await new Promise((resolve) => httpServer.close(resolve)); }
   });
 }
+
+test("a missing bundled browser shows in status and stops navigation with its install command", async () => {
+  const empty = await realpath(await mkdtemp(path.join(os.tmpdir(), "browser-cache-")));
+  const c = client({ PLAYWRIGHT_BROWSERS_PATH: empty, PROMETHEUS_BROWSER_CHANNEL: "default", PROMETHEUS_CONFIG_DIR: "" });
+  try {
+    const before = JSON.parse(c.textOf(await c.call("browser_status")));
+    assert.equal(before.browserInstall.installed, false);
+    assert.deepEqual(before.browserInstall.browsers.map(b => [b.name, b.installed]), [["chromium-headless-shell", false], ["chromium", false]]);
+    assert.ok(before.browserInstall.browsers.every(b => b.directory.startsWith(empty)));
+    assert.equal(before.browserVersion, null);
+    const result = await c.call("browser_navigate", { url: "about:blank" });
+    assert.equal(result.isError, true);
+    assert.match(c.textOf(result), /Playwright browser not installed: chromium-headless-shell \d+\. Run: .*cli\.js install chromium-headless-shell/);
+    assert.equal(JSON.parse(c.textOf(await c.call("browser_status"))).contextOpen, false);
+  } finally { await c.close(); await rm(empty, { recursive: true, force: true }); }
+});
 
 test("missing and foreign-origin saved records do not crash hydration", async () => {
   const { httpServer, base } = await fixtureServer();

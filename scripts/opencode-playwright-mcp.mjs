@@ -8,7 +8,7 @@ import { lstat, mkdir, writeFile, open, realpath } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { loadStateForOrigin, listStates } from "./opencode-browser-state.mjs";
-import { browserConfigFromEnv, browserLaunchOptions, browserRuntimeInfo, createTaskContext, hydrateBrowserState } from "./opencode-browser-runtime.mjs";
+import { browserConfigFromEnv, browserLaunchOptions, browserRuntimeInfo, bundledBrowserInstall, createTaskContext, hydrateBrowserState } from "./opencode-browser-runtime.mjs";
 import { getSessionAuthRecords, sanitizePoolProxyError, verifyTaskSessionOwner } from "./opencode-browser-sessions.mjs";
 import { enterTaskDisplay } from "./opencode-browser-service.mjs";
 import { humanClick, humanType, applyNavigationDelay } from "./opencode-browser-humanize.mjs";
@@ -843,6 +843,14 @@ const HANDLERS = {
       mode: TASK_CONFIG.executionMode || "headless",
       virtualDisplay: TASK_CONFIG.executionMode === "virtual-display" ? process.env.DISPLAY : null,
       launchOptions: browserLaunchOptions(TASK_CONFIG),
+      browserInstall: await (async () => {
+        try {
+          const engine = chromium || (await import("playwright")).chromium;
+          return bundledBrowserInstall(engine, TASK_CONFIG);
+        } catch {
+          return null;
+        }
+      })(),
       browserVersion: browser?.version() ?? null,
       contextOpen: Boolean(context),
       ...(takeoverLost ? { control: "session_lost" } : {}),

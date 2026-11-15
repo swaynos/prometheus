@@ -25,7 +25,7 @@ Paid standalone Turnstile solving is opt-in, never triggered by navigation, and 
 ## Installation and Migration
 
 1. Use Node `>=22.22.2 <25`. Run `npm ci` from the repository root.
-2. Install the browser (`npx playwright install chromium` or Google Chrome). Install `xvfb` and `xauth` on Linux for `virtual-display`.
+2. From the repository root, run `npx playwright install chromium` for bundled Chromium. This installs full Chromium for login and the headless shell for headless tasks. For `channel: "chrome"`, install Google Chrome. Install `xvfb` and `xauth` on Linux for `virtual-display`.
 3. Stop active browser tasks, login helpers, and affected OpenCode services.
 4. Run the installer (`--quiescent` asserts that active work is stopped; add `--migrate` to cut over from `cuddly-winner-browser`):
 
@@ -37,6 +37,16 @@ node scripts/browser-profile.mjs status --config-dir "$HOME/.config/opencode"
 The installer stages dependencies, verifies a blank-page launch without loading accounts or proxy credentials/sessions, checks that no active login helpers or proxy session owners remain, registers `/browser`, and preserves JSONC comments and unrelated config. Restart OpenCode after installation.
 
 CAPTCHA solving is optional and disabled when its configuration is omitted; installing the runtime does not initialize a paid-solve ledger. See [2captcha accounting](BROWSER-2CAPTCHA.md) and the [manual shopping workflow](BROWSER-SHOPPING-WORKFLOW.md). The installed runtime includes their scripts and documentation; provision optional CAPTCHA credentials separately. Local installer fixtures use disposable roots and do not qualify a real headed desktop or Linux/Xvfb.
+
+### Missing Bundled Browsers
+
+Playwright stores bundled browsers in a cache outside the runtime. Cache cleanup can remove these files after a successful installation.
+
+For the `default` and `chromium` channels, `browser_status` reports `browserInstall`: the required browsers, pinned revisions, cache directories, and installation status. This check reads install markers. It does not launch a browser or verify executable integrity or system dependencies.
+
+If a required bundled browser is missing, task launch and login `start` stop before browser launch. Login `start` checks before it creates a worker. The error identifies the missing browser and revision and supplies an `installCommand` that uses the runtime's own Playwright installation. Run that command. Do not run `npx playwright install` from an unrelated directory; it can install a different revision.
+
+The check does not inspect installed Chrome, installed Edge, non-Chromium profiles, or browsers reached through an existing CDP endpoint. It does not download or repair files automatically. The proxy session `doctor` command below does not check browser installation.
 
 ## Proxy Setup and Session Lifecycle
 

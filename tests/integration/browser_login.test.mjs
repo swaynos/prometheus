@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
+import { createRequire } from "node:module";
 import { mkdtemp, writeFile, readFile, readdir, rm, stat, symlink, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +13,7 @@ import { launchExternalCdpContext } from "../../scripts/opencode-browser-runtime
 import { loadStateForOrigin, saveState, statMetadata } from "../../scripts/opencode-browser-state.mjs";
 
 const run = promisify(execFile);
+const require = createRequire(import.meta.url);
 const helper = path.resolve("scripts/opencode-browser-login.mjs");
 
 async function fixture(fn) {
@@ -48,13 +50,39 @@ test("start needs no site-specific completion predicates, allows public URLs, an
   }), /shared browser settings/);
 });
 
+test("start reports a missing bundled browser before it creates worker state", async () => fixture(async (root) => {
+  const tmp = path.join(root, "tmp");
+  await mkdir(tmp);
+  const revision = JSON.parse(await readFile(path.join(path.dirname(require.resolve("playwright-core/package.json")), "browsers.json"), "utf8"))
+    .browsers.find(b => b.name === "chromium").revision;
+  await assert.rejects(
+    invoke(["start", "--config-dir", root, "--name", "A", "--url", "https://example.com/login", "--origin", "https://example.com"],
+      { TMPDIR: tmp, DISPLAY: ":fixture-must-not-open", PLAYWRIGHT_BROWSERS_PATH: path.join(root, "missing-browsers") }),
+    (e) => e.code === 1 && e.stderr.includes(`Playwright browser not installed: chromium ${revision}. Run: `) && /cli\.js install chromium\n$/.test(e.stderr),
+  );
+  assert.deepEqual(await readdir(tmp), []);
+  assert.deepEqual((await readdir(root)).sort(), ["tmp"], "no login socket or worker state is created");
+}));
+
 test("a headed browser launch failure removes its temporary profile", async () => fixture(async (root) => {
   const tmp = path.join(root, "tmp");
   await mkdir(tmp);
-  await assert.rejects(
-    invoke(["start", "--config-dir", root, "--name", "A", "--url", "https://example.com/login", "--origin", "https://example.com"], { TMPDIR: tmp, PLAYWRIGHT_BROWSERS_PATH: path.join(root, "missing-browsers") }),
-    (e) => e.code === 1 && /login window could not open|graphical session|login worker exited before opening a window/.test(e.stderr),
-  );
+  await writeFile(path.join(root, "prometheus-browser.json"), JSON.stringify({ channel: "default", contextOptions: { locale: "en-GB" } }));
+  const worker = path.join(root, "worker.mjs");
+  const starter = path.join(root, "starter.mjs");
+  const loginUrl = new URL("../../scripts/opencode-browser-login.mjs", import.meta.url).href;
+  await writeFile(worker, `
+    import { serveLogin } from ${JSON.stringify(loginUrl)};
+    process.once('message', opts => serveLogin(opts, { chromium: { launchPersistentContext: async () => { throw new Error('fixture launch failure'); } } }));
+  `);
+  const opts = login.validateStartArgs({ "config-dir": root, name: "A", url: "https://example.com/login", origin: ["https://example.com"] });
+  await writeFile(starter, `
+    import { fork } from 'node:child_process';
+    import { startLogin } from ${JSON.stringify(loginUrl)};
+    await startLogin(${JSON.stringify(opts)}, { fork: (_file, args, options) => fork(${JSON.stringify(worker)}, args, options) });
+  `);
+  await assert.rejects(run(process.execPath, [starter], { env: { ...process.env, TMPDIR: tmp } }),
+    (e) => e.code === 1 && /login window could not open/.test(e.stderr));
   assert.deepEqual((await readdir(tmp)).filter((name) => name.startsWith("prometheus-login-")), []);
 }));
 

@@ -337,6 +337,50 @@ export function resolveChromeExecutablePath(chromium, channel) {
   throw new Error("unable to locate browser executable");
 }
 
+const BUNDLED_BROWSERS = ["chromium-headless-shell", "chromium"];
+
+// Login is headed, so it needs full Chromium even when tasks use the headless shell.
+function bundledBrowsersFor(config, role) {
+  const selected = validateBrowserConfig(config);
+  const profile = configuredProfile(selected);
+  if ((profile && profile.engine !== "chromium") || ["chrome", "msedge"].includes(selected.channel) || profile?.channel === "msedge") return [];
+  if (selected.executionMode === "external-cdp") return selected.cdpOptions?.endpoint ? [] : ["chromium"];
+  if (role === "login") return ["chromium"];
+  const distribution = browserRuntimeInfo(selected).configuredDistribution;
+  return BUNDLED_BROWSERS.includes(distribution) ? [distribution] : [];
+}
+
+function playwrightBrowsersRoot(chromium) {
+  for (let dir = chromium.executablePath(); dir !== path.dirname(dir); dir = path.dirname(dir)) {
+    if (/^chromium-\d+$/.test(path.basename(dir))) return path.dirname(dir);
+  }
+  return null;
+}
+
+// Read the pinned revisions and install markers. Do not launch a browser.
+export function bundledBrowserInstall(chromium, config, roles = ["task", "login"]) {
+  if (typeof chromium?.executablePath !== "function") return null;
+  const names = [...new Set(roles.flatMap(role => bundledBrowsersFor(config, role)))];
+  if (!names.length) return null;
+  const core = path.dirname(require.resolve("playwright-core/package.json"));
+  const revisions = Object.fromEntries(JSON.parse(fs.readFileSync(path.join(core, "browsers.json"), "utf8")).browsers.map(b => [b.name, b.revision]));
+  const root = playwrightBrowsersRoot(chromium);
+  const browsers = names.map(name => {
+    const directory = root && revisions[name] ? path.join(root, `${name.replace(/-/g, "_")}-${revisions[name]}`) : null;
+    return { name, revision: revisions[name] ?? null, directory, installed: Boolean(directory) && fs.existsSync(path.join(directory, "INSTALLATION_COMPLETE")) };
+  });
+  const cli = path.join(path.dirname(require.resolve("playwright/package.json")), "cli.js");
+  const installCommand = [process.execPath, cli, "install", ...names].map(arg => /\s/.test(arg) ? JSON.stringify(arg) : arg).join(" ");
+  return { installed: browsers.every(b => b.installed), browsers, installCommand };
+}
+
+export function assertBundledBrowserInstalled(chromium, config, role) {
+  const install = bundledBrowserInstall(chromium, config, [role]);
+  if (!install || install.installed) return;
+  const missing = install.browsers.filter(b => !b.installed).map(b => `${b.name} ${b.revision}`).join(", ");
+  throw new Error(`Playwright browser not installed: ${missing}. Run: ${install.installCommand}`);
+}
+
 function getFreePort() {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -441,6 +485,7 @@ export async function launchExternalCdpContext(chromium, selected, options = {})
   };
 
   if (!endpoint) {
+    assertBundledBrowserInstalled(chromium, selected, "task");
     const port = cdp.port ?? (await getFreePort());
     endpoint = `http://127.0.0.1:${port}`;
     const userDataDir = cdp.userDataDir || (tempUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "prometheus-cdp-")));
@@ -760,6 +805,7 @@ export async function createTaskContext(chromium, config, engines, options = {})
   let browser = null;
   try {
     const browserType = await selectBrowserType(chromium, selected, engines);
+    if (browserType === chromium) assertBundledBrowserInstalled(chromium, selected, "task");
     const launchOptions = browserLaunchOptions(selected);
     if (proxyRelay) {
       launchOptions.proxy = { server: proxyRelay.url };

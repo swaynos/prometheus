@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { createTaskContext, hydrateBrowserState, browserLaunchOptions, browserContextOptions, browserRuntimeInfo, validateBrowserConfig, browserConfigFromEnv, applyAutomationCompatibility } from "../../scripts/opencode-browser-runtime.mjs";
+import { createTaskContext, launchExternalCdpContext, hydrateBrowserState, browserLaunchOptions, browserContextOptions, browserRuntimeInfo, validateBrowserConfig, browserConfigFromEnv, applyAutomationCompatibility, bundledBrowserInstall, assertBundledBrowserInstalled } from "../../scripts/opencode-browser-runtime.mjs";
+import { acquireTaskSession, createSession } from "../../scripts/opencode-browser-sessions.mjs";
+
+const require = createRequire(import.meta.url);
 
 const channels = [...new Set(["default", "chromium", process.env.PROMETHEUS_TEST_BROWSER_CHANNEL].filter(Boolean))];
 
@@ -257,6 +261,59 @@ test("runtime metadata identifies the selected distribution without starting a b
   assert.deepEqual(shell.contextOptions, browserContextOptions({ channel: "default" }));
   assert.equal(browserRuntimeInfo({ channel: "chrome" }).configuredDistribution, "installed-chrome");
   assert.equal(browserRuntimeInfo({ channel: "default", executionMode: "virtual-display" }).configuredDistribution, "chromium");
+});
+
+test("browser install status reads Playwright's markers without starting a browser", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "browser-install-"));
+  try {
+    const revisions = Object.fromEntries(JSON.parse(await readFile(path.join(path.dirname(require.resolve("playwright-core/package.json")), "browsers.json"), "utf8"))
+      .browsers.map(b => [b.name, b.revision]));
+    const shell = path.join(root, `chromium_headless_shell-${revisions["chromium-headless-shell"]}`);
+    const full = path.join(root, `chromium-${revisions.chromium}`);
+    let launched = false;
+    const chromiumStub = { executablePath: () => path.join(full, "chrome-fixture", "chrome"), launch: async () => { launched = true; } };
+
+    const missing = bundledBrowserInstall(chromiumStub, { channel: "default" });
+    assert.equal(missing.installed, false);
+    assert.deepEqual(missing.browsers, [
+      { name: "chromium-headless-shell", revision: revisions["chromium-headless-shell"], directory: shell, installed: false },
+      { name: "chromium", revision: revisions.chromium, directory: full, installed: false },
+    ]);
+    assert.ok(missing.installCommand.startsWith(process.execPath));
+    assert.match(missing.installCommand, /playwright[\\/]cli\.js install chromium-headless-shell chromium$/);
+
+    await assert.rejects(createTaskContext(chromiumStub, { channel: "default" }), /Playwright browser not installed: chromium-headless-shell \d+\. Run: .*install chromium-headless-shell$/);
+    await assert.rejects(launchExternalCdpContext(chromiumStub, { channel: "default", executionMode: "external-cdp" }), /not installed: chromium \d+\. Run: .*install chromium$/);
+    assert.equal(launched, false);
+
+    await mkdir(shell);
+    assert.equal(bundledBrowserInstall(chromiumStub, { channel: "default" }, ["task"]).installed, false);
+    await writeFile(path.join(shell, "INSTALLATION_COMPLETE"), "");
+    assert.equal(bundledBrowserInstall(chromiumStub, { channel: "default" }, ["task"]).installed, true);
+    assert.equal(bundledBrowserInstall(chromiumStub, { channel: "default" }).installed, false, "login still needs full Chromium");
+    assert.doesNotThrow(() => assertBundledBrowserInstalled(chromiumStub, { channel: "default" }, "task"));
+    assert.throws(() => assertBundledBrowserInstalled(chromiumStub, { channel: "default" }, "login"), /not installed: chromium \d+\. Run: .*install chromium$/);
+
+    assert.deepEqual(bundledBrowserInstall(chromiumStub, { channel: "chromium" }).browsers.map(b => b.name), ["chromium"]);
+    assert.deepEqual(bundledBrowserInstall(chromiumStub, { channel: "default", executionMode: "external-cdp" }).browsers.map(b => b.name), ["chromium"]);
+    for (const config of [{ channel: "chrome" }, { channel: "msedge" }, { channel: "default", profile: "pw-desktop-firefox" },
+      { channel: "default", executionMode: "external-cdp", cdpOptions: { endpoint: "http://127.0.0.1:9222" } }]) {
+      assert.equal(bundledBrowserInstall(chromiumStub, config), null);
+    }
+    assert.equal(bundledBrowserInstall({ launch() {} }, { channel: "default" }), null);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a missing browser releases the proxy task lease and relay", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "browser-install-proxy-"));
+  try {
+    const config = { channel: "default", proxy: { session: "fixture", strategy: "round-robin", pool: [{ id: "local", server: "http://127.0.0.1:1" }] } };
+    await createSession(root, config);
+    const chromiumStub = { executablePath: () => path.join(root, "chromium-0", "chrome"), launch: async () => { throw new Error("must not launch"); } };
+    await assert.rejects(createTaskContext(chromiumStub, config, undefined, { configDir: root }), /Playwright browser not installed/);
+    const lease = await acquireTaskSession(root, config);
+    lease.release();
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("settings files carry launch and context options through normalization", async () => {

@@ -29,6 +29,8 @@ Do not change settings or switch modes to retry an access denial.
 
 ## 2. Browser Profiles
 
+`browser_status` reports `browserInstall` for bundled Chromium: the required browsers, pinned revisions, cache directories, and installation status. The check reads install markers without launching a browser; it does not verify executable integrity or system dependencies. If a required browser is missing, task launch and login `start` stop and supply the runtime's own `installCommand`. Run that command, not `npx playwright install` from another directory. Installed Chrome/Edge, non-Chromium profiles, and existing CDP endpoints are not checked (`browserInstall: null`).
+
 `scripts/browser-profiles.mjs` provides 241 read-only presets from pinned Playwright 1.63.0 descriptors (207 upstream devices, 30 desktop OS/display variants, and 4 legacy Chrome 124 presets).
 
 ```sh

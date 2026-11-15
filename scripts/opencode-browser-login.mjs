@@ -28,6 +28,7 @@ import {
   selectBrowserType,
   validateBrowserConfig,
   launchExternalCdpContext,
+  assertBundledBrowserInstalled,
 } from "./opencode-browser-runtime.mjs";
 import {
   bindAuthRecord,
@@ -470,6 +471,7 @@ async function main(argv) {
     case "start": {
       const opts = validateStartArgs(args);
       assertGraphicalSession();
+      assertBundledBrowserInstalled((await import("playwright")).chromium, opts.browser, "login");
       process.stdout.write(`${JSON.stringify(await startLogin(opts))}\n`);
       return 0;
     }
