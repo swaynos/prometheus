@@ -41,7 +41,7 @@ jobs:
         run: xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24 -nolisten tcp' env PROMETHEUS_VIRTUAL_DISPLAY=1 node --test --test-timeout=300000 tests/integration/browser_sessions.test.mjs tests/integration/browser_proxy.test.mjs
       - name: Controller regressions
         if: matrix.channel == 'default' && matrix.mode == 'headless'
-        run: npm run test:controller
+        run: npm --prefix packages/prometheus ci && npm run test:controller
       - name: Managed virtual-display launcher and cleanup
         if: matrix.mode == 'virtual-display'
         run: node --test --test-timeout=300000 tests/integration/browser_virtual_display.test.mjs
