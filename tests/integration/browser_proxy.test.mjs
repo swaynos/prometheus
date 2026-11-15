@@ -42,6 +42,10 @@ import { repoRoot, spawnMcpClient } from "./helpers.mjs";
 
 const execFileAsync = promisify(execFile);
 const testChannel = process.env.PROMETHEUS_TEST_BROWSER_CHANNEL || "default";
+const testMode = process.env.PROMETHEUS_TEST_PROXY_MODE || "headless";
+if (!["headless", "virtual-display"].includes(testMode)) {
+  throw new Error("PROMETHEUS_TEST_PROXY_MODE must be headless or virtual-display");
+}
 
 const TINY_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aW1sAAAAASUVORK5CYII=",
@@ -572,6 +576,8 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
 
   const proxyA = createAuthProxyFixture(t, proxyCreds);
   const proxyAUrl = await proxyA.start();
+  const proxyB = createAuthProxyFixture(t);
+  const proxyBUrl = await proxyB.start();
 
   // Destination HTTP server tracking received auth headers and actions.
   let directHitsWhenProxyDown = 0;
@@ -594,6 +600,11 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
       res.end("Target Auth Required");
       return;
     }
+    if (req.url === "/forbidden") {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
     if (req.url === "/home") {
       res.writeHead(200, { "Content-Type": "text/html" });
       res.end(`<!doctype html><html><body>
@@ -610,7 +621,7 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
       </body></html>`);
       return;
     }
-    if (req.url === "/asset.png") {
+    if (req.url === "/asset.png" || req.url === "/asset.png?url-download=1") {
       res.writeHead(200, { "Content-Type": "image/png" });
       res.end(TINY_PNG);
       return;
@@ -658,14 +669,14 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
 
   const cfg = {
     channel: testChannel,
-    executionMode: "headless",
+    executionMode: testMode,
     automationCompatibility: true,
     proxy: {
       session: "shopping",
       strategy: "round-robin",
       pool: [
         { id: "proxy-a", server: proxyAUrl, credentialsFile: credRel },
-        { id: "proxy-b", server: "http://127.0.0.1:18202" },
+        { id: "proxy-b", server: proxyBUrl },
       ],
     },
   };
@@ -680,7 +691,7 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
     storageState: { cookies: [{ name: "leak", value: "must-not-load", domain: "example.com", path: "/", secure: true }], origins: [] },
   });
 
-  const mcp = spawnMcpClient({ PROMETHEUS_CONFIG_DIR: dir }, { captureStderr: true });
+  let mcp = spawnMcpClient({ PROMETHEUS_CONFIG_DIR: dir }, { captureStderr: true });
   t.after(async () => { await mcp.close().catch(() => {}); });
 
   await mcp.rpc("initialize", {
@@ -701,6 +712,7 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
   assert.doesNotMatch(JSON.stringify(preStatus), /proxyAuthUser77|ProxyAuthPassword|credentialsFile|endpointFingerprint|18202/);
   assert.equal(JSON.stringify(preStatus).includes(proxyAUrl), false);
 
+
   // Navigate to home page via authenticated HTTP proxy + exercise frame, popup, upload, download, media save.
   const navRes = await mcp.call("browser_navigate", { url: `${targetOrigin}/home` });
   assert.equal(navRes.isError, undefined);
@@ -709,6 +721,25 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
   const postStatus = JSON.parse(mcp.textOf(await mcp.call("browser_status")));
   assert.equal(postStatus.contextOpen, true);
   assert.deepEqual(postStatus.proxy, preStatus.proxy);
+
+  // Closing and reopening the browser, then restarting the MCP process, retains the assignment and cursor.
+  assert.equal((await mcp.call("browser_close")).isError, undefined);
+  assert.equal((await mcp.call("browser_navigate", { url: `${targetOrigin}/after-close` })).isError, undefined);
+  assert.deepEqual(JSON.parse(mcp.textOf(await mcp.call("browser_status"))).proxy, preStatus.proxy);
+  await mcp.call("browser_close");
+  await mcp.close();
+  const restarted = spawnMcpClient({ PROMETHEUS_CONFIG_DIR: dir }, { captureStderr: true });
+  t.after(async () => { await restarted.close().catch(() => {}); });
+  await restarted.rpc("initialize", {
+    protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "proxy-restart-test", version: "1.0" },
+  });
+  assert.equal((await restarted.call("browser_navigate", { url: `${targetOrigin}/after-restart` })).isError, undefined);
+  assert.deepEqual(JSON.parse(restarted.textOf(await restarted.call("browser_status"))).proxy, preStatus.proxy);
+  assert.equal(listSessions(dir).nextProxyId, "proxy-b");
+  assert.ok(proxyA.httpRequests.some((r) => r.url.endsWith("/after-restart")));
+  assert.equal(proxyB.httpRequests.length + proxyB.connectRequests.length, 0);
+  mcp = restarted;
+  assert.equal((await mcp.call("browser_navigate", { url: `${targetOrigin}/home` })).isError, undefined);
 
   // Frame text extraction goes through proxy.
   const framesRes = JSON.parse(mcp.textOf(await mcp.call("browser_frames")));
@@ -728,12 +759,13 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
   assert.ok(fs.statSync(mediaOut).size > 0);
 
   const assetDlRes = await mcp.call("browser_download", {
-    url: `${targetOrigin}/asset.png`,
+    url: `${targetOrigin}/asset.png?url-download=1`,
     path: assetOut,
     expected_sha256: crypto.createHash("sha256").update(TINY_PNG).digest("hex"),
   });
   assert.equal(assetDlRes.isError, undefined);
   assert.equal(Buffer.compare(fs.readFileSync(assetOut), TINY_PNG), 0);
+  assert.ok(proxyA.httpRequests.some((r) => r.url === `${targetOrigin}/asset.png?url-download=1`), "URL download itself must traverse the pinned proxy");
 
   const dlRes = await mcp.call("browser_download", {
     selector: "#dl",
@@ -748,12 +780,20 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
   await mcp.call("browser_click", { selector: "#submitBtn", expect: { kind: "visible", selector: "#uploaded" } });
   assert.equal(uploadedBytes.length >= 1, true);
   assert.equal(uploadedBytes[0].includes(TINY_PNG), true);
+  for (const pathname of ["/asset.png", "/download.bin", "/upload"]) {
+    assert.ok(proxyA.httpRequests.some((r) => new URL(r.url).pathname === pathname), `${pathname} must traverse the pinned proxy`);
+  }
 
   // Target HTTP 401 + WWW-Authenticate: Basic must NEVER receive proxy credentials!
   const target401Res = await mcp.call("browser_navigate", { url: `${targetOrigin}/require-target-auth` });
   const target401Text = mcp.textOf(target401Res);
   assert.match(target401Text, /access denied/i);
   assert.doesNotMatch(target401Text, /407|proxy authentication/i);
+  const forbidden = await mcp.call("browser_navigate", { url: `${targetOrigin}/forbidden` });
+  assert.match(mcp.textOf(forbidden), /access denied/i);
+  assert.deepEqual(JSON.parse(mcp.textOf(await mcp.call("browser_status"))).proxy, preStatus.proxy);
+  assert.equal(listSessions(dir).nextProxyId, "proxy-b");
+  assert.equal(proxyB.httpRequests.length + proxyB.connectRequests.length, 0);
   assert.ok(proxyA.httpRequests.length > 0);
   assert.ok(proxyA.httpRequests.every((r) => r.proxyAuth !== null));
   for (const hit of targetReceivedAuth) {
@@ -771,6 +811,17 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
   assert.equal(err407.includes(proxyAUrl), false);
   assert.equal(showSession(dir, "shopping").generation, 1);
   assert.equal(showSession(dir, "shopping").proxyId, "proxy-a");
+  assert.equal(targetReceivedAuth.some((r) => r.url === "/after-407"), false);
+  assert.equal(listSessions(dir).nextProxyId, "proxy-b");
+  assert.equal(proxyB.httpRequests.length + proxyB.connectRequests.length, 0);
+  const tab407 = await mcp.call("browser_tab_new", { url: `${targetOrigin}/tab-after-407` });
+  assert.equal(tab407.isError, true);
+  assert.match(mcp.textOf(tab407), /407|proxy authentication/i);
+  assert.doesNotMatch(mcp.textOf(tab407), /access denied|proxyAuthUser77|ProxyAuthPassword/i);
+  assert.equal(targetReceivedAuth.some((r) => r.url === "/tab-after-407"), false);
+  assert.equal(showSession(dir, "shopping").generation, 1);
+  assert.equal(showSession(dir, "shopping").proxyId, "proxy-a");
+  assert.equal(proxyB.httpRequests.length + proxyB.connectRequests.length, 0);
   proxyA.setForce407(false);
 
   // Return to home page cleanly before shutting down upstream proxy to test interrupted action non-replay + proxy-down.
@@ -793,6 +844,8 @@ test("end-to-end Playwright MCP HTTP proxy, transfers, target 401 non-leak, hydr
   assert.match(mcp.textOf(downNav), /proxy connection failed/i);
   assert.equal(directHitsWhenProxyDown, 0, "proxy failure MUST NOT fall back to a direct connection");
   assert.equal(showSession(dir, "shopping").proxyId, "proxy-a");
+  assert.equal(listSessions(dir).nextProxyId, "proxy-b");
+  assert.equal(proxyB.httpRequests.length + proxyB.connectRequests.length, 0);
   assert.doesNotMatch(mcp.errors(), /proxyAuthUser77|ProxyAuthPassword/);
 });
 
@@ -830,7 +883,7 @@ test("HTTPS CONNECT tunnel routes through authenticated proxy without leaking pr
 
   const cfg = {
     channel: testChannel,
-    executionMode: "headless",
+    executionMode: testMode,
     proxy: {
       session: "tls-sess",
       strategy: "round-robin",
@@ -841,14 +894,25 @@ test("HTTPS CONNECT tunnel routes through authenticated proxy without leaking pr
 
   // Test-only SPKI pin allows strict Chromium TLS verification of our ephemeral self-signed localhost fixture.
   const spkiChromium = Object.create(chromium);
-  spkiChromium.launch = (opts) =>
-    chromium.launch({
+  spkiChromium.launch = (opts) => {
+    assert.equal(opts.headless, testMode === "headless", "qualified task mode must reach the real launch");
+    return chromium.launch({
       ...opts,
       args: [...(opts.args || []), `--ignore-certificate-errors-spki-list=${certInfo.spkiPin}`],
     });
+  };
 
   const { browser, context, proxyRelay } = await createTaskContext(spkiChromium, cfg, undefined, { configDir: dir });
   t.after(async () => { await browser.close().catch(() => {}); });
+  t.diagnostic(JSON.stringify({
+    platform: process.platform,
+    arch: process.arch,
+    node: process.version,
+    playwright: JSON.parse(fs.readFileSync(path.join(repoRoot, "node_modules/playwright/package.json"), "utf8")).version,
+    channel: testChannel,
+    mode: testMode,
+    browser: browser.version(),
+  }));
 
   const page = await context.newPage();
   const okResp = await page.goto(`${httpsOrigin}/ok`);
@@ -915,7 +979,7 @@ test("hydration filters strictly by session generation and login helper binds af
 
   const cfg = {
     channel: testChannel,
-    executionMode: "headless",
+    executionMode: testMode,
     proxy: {
       session: "acct-session",
       strategy: "round-robin",
@@ -940,7 +1004,20 @@ test("hydration filters strictly by session generation and login helper binds af
     verification: { selector: "#acct-badge" },
   });
 
+  // Exercise the production MCP hydration filter against the unbound same-origin state.
+  const assertGuest = async () => {
+    const mcp = spawnMcpClient({ PROMETHEUS_CONFIG_DIR: dir, TEST_PROXY_SPKI: certInfo.spkiPin, NODE_OPTIONS: `--import=${path.join(repoRoot, "tests/integration/browser_proxy_spki_preload.mjs")}` }, { captureStderr: true });
+    try {
+      assert.equal((await mcp.call("browser_navigate", { url: `${httpsOrigin}/account` })).isError, undefined);
+      const snapshot = mcp.textOf(await mcp.call("browser_snapshot"));
+      assert.match(snapshot, /Guest/);
+      assert.doesNotMatch(snapshot, /Authenticated/);
+    } finally { await mcp.close(); }
+  };
+  await assertGuest();
+
   const issued = await issueLoginHandoff(dir, cfg);
+  assert.equal(issued.generation, 1);
 
   const workerHarness = path.join(dir, "login-worker-test.mjs");
   const playwrightUrl = pathToFileURL(path.join(repoRoot, "node_modules/playwright/index.mjs")).href;
@@ -951,7 +1028,7 @@ test("hydration filters strictly by session generation and login helper binds af
      const spkiChromium = Object.create(chromium);
      spkiChromium.launchPersistentContext = (userDataDir, opts) => chromium.launchPersistentContext(userDataDir, {
        ...opts,
-       headless: true,
+       headless: ${JSON.stringify(testMode === "headless")},
        args: [...(opts.args || []), ${JSON.stringify(`--ignore-certificate-errors-spki-list=${certInfo.spkiPin}`)}],
      });
      process.once('message', (opts) => { void serveLogin(opts, { chromium: spkiChromium }); });`,
@@ -975,7 +1052,9 @@ test("hydration filters strictly by session generation and login helper binds af
 
   // Confirm proxy saw the login navigation through proxy-a without consuming cursor (proxyId still proxy-a, nextProxyId still proxy-b).
   assert.equal(showSession(dir, "acct-session").proxyId, "proxy-a");
+  assert.equal(showSession(dir, "acct-session").generation, issued.generation);
   assert.equal(listSessions(dir).nextProxyId, "proxy-b");
+  assert.ok(proxyA.connectRequests.length > 0, "login navigation must traverse the pinned proxy");
 
   // Rotation is refused while login window is awaiting user.
   await assert.rejects(() => rotateSession(dir, cfg), /login helper is active/);

@@ -1,9 +1,10 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import metadata from '../package.json' with { type: 'json' };
 
 export async function fixture(t, { agent = 'build', commands = [{ name: 'goal', description: 'Native goal.' }], values = new Map() } = {}) {
-  const base = fs.mkdtempSync(path.join('/tmp/opencode', 'prometheus-test-'));
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'prometheus-test-'));
   const root = fs.mkdirSync(path.join(base, 'project'), { recursive: true });
   const privateRoot = fs.mkdirSync(path.join(base, 'private'), { recursive: true });
   fs.mkdirSync(path.join(privateRoot, 'evidence'));

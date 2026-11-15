@@ -8,6 +8,16 @@ import { createTaskContext, hydrateBrowserState, browserLaunchOptions, browserCo
 
 const channels = [...new Set(["default", "chromium", process.env.PROMETHEUS_TEST_BROWSER_CHANNEL].filter(Boolean))];
 
+test("legacy settings omit optional proxy and CAPTCHA", () => {
+  const config = validateBrowserConfig({ channel: "default" });
+  for (const key of ["proxy", "captcha"]) assert.equal(Object.hasOwn(config, key), false);
+  assert.equal(browserLaunchOptions(config).headless, true);
+});
+
+test("removed diagnostic configuration is rejected before browser startup", () => {
+  assert.throws(() => validateBrowserConfig({ channel: "default", cloudscraper: {} }));
+});
+
 for (const channel of channels) {
   test(`supported ${channel} runtime restores private storage before page scripts`, async () => {
     const { browser, context } = await createTaskContext(chromium, { channel });
@@ -35,7 +45,7 @@ test("virtual-display mode selects headed task execution without changing human 
   assert.equal(browserLaunchOptions(config).headless, false);
   assert.equal(browserLaunchOptions(config, false).headless, false);
   assert.equal(browserLaunchOptions({ channel: "chrome" }).headless, true);
-  assert.throws(() => validateBrowserConfig({ channel: "chrome", executionMode: "headed" }));
+  assert.equal(browserLaunchOptions({ channel: "chrome", executionMode: "headed" }).headless, false);
   assert.equal(browserConfigFromEnv({ PROMETHEUS_BROWSER_EXECUTION_MODE: "virtual-display" }).executionMode, "virtual-display");
 });
 
@@ -134,7 +144,7 @@ test("shared settings override inherited values and reject malformed files", asy
     assert.equal(browserLaunchOptions(config, false).channel, "chrome");
     await writeFile(path.join(dir, "prometheus-browser.json"), "not json");
     assert.throws(() => browserConfigFromEnv(env), /settings/);
-    await writeFile(path.join(dir, "prometheus-browser.json"), JSON.stringify({ ...settings, executionMode: "headed" }));
+    await writeFile(path.join(dir, "prometheus-browser.json"), JSON.stringify({ ...settings, executionMode: "invalid-mode" }));
     assert.throws(() => browserConfigFromEnv(env), /settings/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

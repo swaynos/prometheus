@@ -13,6 +13,7 @@ import net from "node:net";
 import { spawn, execSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { BROWSER_PROFILES, getBrowserProfile, resolveBrowserProfile, browserProfileInfo } from "./browser-profiles.mjs";
+import { validateCaptchaConfig } from "./opencode-browser-2captcha.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -98,7 +99,7 @@ function validateCdpOptions(value) {
 
 export function validateBrowserConfig(config) {
   if (!config || typeof config !== "object" || Array.isArray(config) ||
-      Object.keys(config).some((key) => !["channel", "profile", "automationCompatibility", "executionMode", "launchOptions", "contextOptions", "cdpOptions", "identityProfile", "humanize", "proxy"].includes(key)) ||
+      Object.keys(config).some((key) => !["channel", "profile", "automationCompatibility", "executionMode", "launchOptions", "contextOptions", "cdpOptions", "identityProfile", "humanize", "proxy", "captcha"].includes(key)) ||
       !["default", "chromium", "chrome", "msedge"].includes(config.channel)) {
     throw new Error("browser must specify channel: default, chromium, chrome, or msedge");
   }
@@ -114,8 +115,8 @@ export function validateBrowserConfig(config) {
       throw new Error(`invalid identityProfile: ${config.identityProfile}`);
     }
   }
-  if (config.executionMode !== undefined && !["headless", "virtual-display", "external-cdp", "cdp"].includes(config.executionMode)) {
-    throw new Error("executionMode must be headless, virtual-display, or external-cdp");
+  if (config.executionMode !== undefined && !["headless", "headed", "virtual-display", "external-cdp", "cdp"].includes(config.executionMode)) {
+    throw new Error("executionMode must be headless, headed, virtual-display, or external-cdp");
   }
   const mode = config.executionMode === "cdp" ? "external-cdp" : config.executionMode;
   if (mode === "external-cdp" && config.channel === "msedge") throw new Error("external-cdp does not support the msedge launcher");
@@ -152,11 +153,12 @@ export function validateBrowserConfig(config) {
     ...(config.humanize !== undefined ? { humanize: config.humanize } : {}),
     ...(config.profile !== undefined ? { profile: profile.id } : {}),
     ...(config.identityProfile !== undefined ? { identityProfile: config.identityProfile } : {}),
-    ...(mode === "virtual-display" || mode === "external-cdp" ? { executionMode: mode } : {}),
+    ...(mode === "headed" || mode === "virtual-display" || mode === "external-cdp" ? { executionMode: mode } : {}),
     ...(launchOptions !== undefined ? { launchOptions } : {}),
     ...(config.contextOptions !== undefined ? { contextOptions: validateContextOptions(config.contextOptions) } : {}),
     ...(config.cdpOptions !== undefined ? { cdpOptions: validateCdpOptions(config.cdpOptions) } : {}),
     ...(proxy !== undefined ? { proxy } : {}),
+    ...(config.captcha !== undefined ? { captcha: validateCaptchaConfig(config.captcha) } : {}),
   };
 }
 
@@ -208,7 +210,7 @@ export function browserLaunchOptions(config, headless) {
   const channel = configuredProfile(selected)?.channel === "msedge" ? "msedge" : selected.channel;
   return {
     ...launchOptions,
-    headless: headless ?? executionMode !== "virtual-display",
+    headless: headless ?? !["headed", "virtual-display"].includes(executionMode),
     ...(channel === "default" ? {} : { channel }),
     ...(automationCompatibility ? {
       ignoreDefaultArgs: ["--enable-automation"],
@@ -310,7 +312,7 @@ export function browserRuntimeInfo(config) {
       : selected.channel === "msedge" || profile?.channel === "msedge" ? "installed-edge"
       : selected.executionMode === "external-cdp" ? "external-chrome-cdp"
       : selected.channel === "chrome" ? "installed-chrome"
-      : selected.channel === "chromium" || selected.executionMode === "virtual-display" ? "chromium" : "chromium-headless-shell",
+      : selected.channel === "chromium" || ["headed", "virtual-display"].includes(selected.executionMode) ? "chromium" : "chromium-headless-shell",
     contextOptions: browserContextOptions(selected),
     ...(selected.executionMode ? { executionMode: selected.executionMode } : {}),
     ...(selected.proxy ? { proxy: { enabled: true, session: selected.proxy.session, routing: "configured" } } : {}),

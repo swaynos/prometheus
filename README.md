@@ -35,6 +35,10 @@ Model reports do not establish independent acceptance.
 
 Require stable OpenCode **>=2.2.1 <3.0.0**. See the [package guide](packages/prometheus/README.md).
 
+For optional paid challenge solving, create a Git-ignored project-root `.env` (mode `0600`) containing `TWOCAPTCHA_API_KEY=your-key`; `.env.example` is an empty template. Run the browser from that directory or configure an absolute `envFile` for an installed runtime. A key alone does not enable solving: explicit policy, ledger and per-call authorization remain required. Budget limits are reservation estimates, not a guaranteed provider charge ceiling. See [the adapter guide](docs/BROWSER-2CAPTCHA.md).
+
+Browser changes in this checkout are review candidates, not an update to any existing active installation, which may still run older code. An isolated candidate installation reached `https://example.com` in the Phase C qualification; this does not qualify a real provider, proxy, or human desktop session. Those require their own prerequisites and explicit authorization. No retailer is required, and paid calls are never automatic.
+
 ```sh
 npm run test:controller
 npm run test:controller:native

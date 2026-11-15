@@ -299,7 +299,8 @@ function ensurePrivateDirectory(dirPath) {
     return verifyExistingDirNoFollow(dirPath, { requirePrivate: true });
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-    fs.mkdirSync(dirPath, { mode: 0o700 });
+    try { fs.mkdirSync(dirPath, { mode: 0o700 }); }
+    catch (mkdirError) { if (mkdirError.code !== 'EEXIST') throw mkdirError; }
     return verifyExistingDirNoFollow(dirPath, { requirePrivate: true });
   }
 }
@@ -1337,6 +1338,121 @@ export function showSession(configDir, sessionName) {
   });
 }
 
+// Diagnostics must not acquire locks or call the ownership inspectors that prune
+// dead records. Return only fixed status codes, never raw filesystem errors,
+// owner records, endpoints, paths, or credential values.
+function diagnoseSessionOwners(layout, session, generation) {
+  const paths = sessionOwnerPaths(layout, session);
+  const counts = { alive: 0, dead: 0, ambiguous: 0 };
+  let task = "missing";
+  const classify = (file) => {
+    const state = classifyRecordLiveness(file);
+    if (state.status === "alive" && (state.record.session !== session || state.record.generation !== generation)) {
+      return "ambiguous";
+    }
+    return state.status;
+  };
+  try {
+    verifyExistingDirNoFollow(layout.ownersDir, { requirePrivate: true });
+    verifyExistingDirNoFollow(paths.sessionDir, { requirePrivate: true });
+    task = classify(paths.taskPath);
+    try {
+      verifyExistingDirNoFollow(paths.helpersDir, { requirePrivate: true });
+      for (const name of fs.readdirSync(paths.helpersDir)) {
+        if (name.includes(".tmp.")) continue;
+        const status = classify(path.join(paths.helpersDir, name));
+        if (status !== "missing") counts[status] += 1;
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") counts.ambiguous += 1;
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") task = "ambiguous";
+  }
+  return { task, helpers: counts };
+}
+
+export function diagnoseSessions(configDir, rawConfig) {
+  const proxy = validateProxyConfig(rawConfig?.proxy);
+  const issues = [];
+  const addIssue = (code, details = {}, severity = "error") => issues.push({ code, severity, ...details });
+  const result = {
+    scope: "local-only",
+    selectedSession: proxy.session,
+    registry: "missing",
+    locks: { registry: "missing", reclaim: "missing" },
+    nextProxyId: null,
+    proxies: [],
+    sessions: [],
+    issues,
+  };
+
+  // Read and validate credentials locally, but never retain them in the report.
+  for (const entry of proxy.pool) {
+    let credentials = "not-required";
+    if (entry.credentialsFile) {
+      try {
+        readProxyCredentials(configDir, entry.credentialsFile);
+        credentials = "valid";
+      } catch {
+        credentials = "invalid";
+        addIssue("credentials-invalid", { proxyId: entry.id });
+      }
+    }
+    result.proxies.push({ proxyId: entry.id, credentials });
+  }
+
+  let layout;
+  let registry;
+  try {
+    layout = ensureSessionsLayout(configDir, { create: false });
+    for (const [key, file] of [["registry", layout.registryLockPath], ["reclaim", layout.reclaimLockPath]]) {
+      const { status } = classifyRecordLiveness(file);
+      result.locks[key] = status;
+      if (status === "ambiguous") addIssue("lock-ambiguous", { lock: key });
+      if (status === "alive" || status === "dead") addIssue(`lock-${status}`, { lock: key }, "warning");
+    }
+    const read = readRegistryStrict(layout.registryPath);
+    registry = read.registry;
+    result.registry = read.exists ? "valid" : "missing";
+  } catch (error) {
+    // ENOENT at this level means that the layout has not been created.
+    result.registry = error.code === "ENOENT" ? "missing" : "invalid";
+    addIssue(result.registry === "missing" ? "registry-missing" : "registry-invalid");
+  }
+
+  if (registry) {
+    if (result.registry === "missing") addIssue("registry-missing");
+    result.nextProxyId = registry.nextProxyId;
+    if (registry.nextProxyId !== null && !proxy.pool.some((entry) => entry.id === registry.nextProxyId)) {
+      addIssue("cursor-proxy-missing");
+    }
+    for (const session of Object.keys(registry.sessions).sort()) {
+      const record = registry.sessions[session];
+      const entry = proxy.pool.find((item) => item.id === record.proxyId);
+      const assignment = !entry ? "proxy-missing"
+        : fingerprintEndpoint(entry.server) !== record.endpointFingerprint ? "endpoint-changed" : "configured";
+      if (assignment !== "configured") addIssue(assignment, { session, proxyId: record.proxyId });
+      const owners = diagnoseSessionOwners(layout, session, record.generation);
+      const ambiguous = owners.task === "ambiguous" || owners.helpers.ambiguous > 0;
+      if (ambiguous) addIssue("ownership-ambiguous", { session });
+      if (owners.task === "dead" || owners.helpers.dead > 0) addIssue("ownership-dead", { session }, "warning");
+      result.sessions.push({
+        session,
+        generation: record.generation,
+        proxyId: record.proxyId,
+        assignment,
+        owners,
+        inactive: !ambiguous && owners.task !== "alive" && owners.helpers.alive === 0,
+      });
+    }
+  }
+  if (result.registry !== "invalid" && !registry?.sessions[proxy.session]) {
+    addIssue("selected-session-missing", { session: proxy.session });
+  }
+  return { ...result, ok: !issues.some((issue) => issue.severity === "error") };
+}
+
 export async function bindAuthRecord(configDir, sessionName, authName, { expectedGeneration } = {}) {
   try {
     assertValidName(sessionName);
@@ -1506,13 +1622,16 @@ export async function reconcileSession(configDir, rawConfig, { session, proxyId,
       record.proxyId = entry.id;
       record.endpointFingerprint = nextFp;
       record.rotatedAt = new Date().toISOString();
-      if (proxyChanged && !retainAssociations) {
+      if (!retainAssociations) {
         record.authRecords = [];
       }
       purgePendingSessionHandoffs(layout, targetSession);
       writeRegistryAtomic(layout, registry);
     }
-    return sanitizeSessionView(targetSession, record);
+    const warnings = (proxyChanged || endpointChanged) && retainAssociations
+      ? ["retained prior auth associations across proxy reconciliation; changed routing may require renewed verification"]
+      : [];
+    return sanitizeSessionView(targetSession, record, warnings.length ? { warnings } : {});
   });
 }
 
@@ -1594,6 +1713,16 @@ export function verifySessionGeneration(configDir, rawConfig, expectedGeneration
   }
   assertPinnedSessionMatchesPool(proxy.session, record, proxy.pool);
   return sanitizeSessionView(proxy.session, record);
+}
+
+export function verifyTaskSessionOwner(configDir, rawConfig, expectedGeneration, expectedOwnerId) {
+  verifySessionGeneration(configDir, rawConfig, expectedGeneration);
+  const proxy = validateProxyConfig(rawConfig?.proxy);
+  const layout = ensureSessionsLayout(configDir, { create: false });
+  const { taskOwner } = inspectSessionOwners(layout, proxy.session);
+  if (!expectedOwnerId || !taskOwner || taskOwner.token !== expectedOwnerId || taskOwner.generation !== expectedGeneration) {
+    throw new BrowserSessionError("task session ownership unavailable or changed");
+  }
 }
 
 export async function issueLoginHandoff(configDir, rawConfig, { session, expectedOwnerId, expectedGeneration, ttlMs = DEFAULT_HANDOFF_TTL_MS } = {}) {

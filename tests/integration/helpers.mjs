@@ -7,9 +7,10 @@ export const repoRoot = path.resolve(import.meta.dirname, "../..");
 export const defaultMcpServer = process.env.PROMETHEUS_TEST_BROWSER_SERVER || path.join(repoRoot, "scripts", "opencode-playwright-mcp.mjs");
 export const hasXvfb = spawnSync("sh", ["-c", "command -v Xvfb && command -v xvfb-run && command -v xauth"], { stdio: "ignore" }).status === 0;
 
-export function spawnMcpClient(env = {}, { server = defaultMcpServer, timeoutMs = 60000, captureStderr = false } = {}) {
+export function spawnMcpClient(env = {}, { server = defaultMcpServer, timeoutMs = 60000, captureStderr = false, cwd } = {}) {
   const child = spawn(process.execPath, [server], {
     stdio: ["pipe", "pipe", captureStderr ? "pipe" : "inherit"],
+    cwd,
     env: { ...process.env, PROMETHEUS_CONFIG_DIR: "", ...env },
   });
   const exited = once(child, "exit");

@@ -20,6 +20,8 @@ The browser runtime is separate from goal execution and installs under `<config_
 | --- | --- |
 | [Resource selection rule](../rules/resource-selection.md) | Compact workflow and safeguard rule loaded in OpenCode instructions. |
 | [Browser reference](RESOURCE-SELECTION.md) | Shared settings, profiles, login handoff, file transfers, and failure handling. |
+| [Shopping workflow](BROWSER-SHOPPING-WORKFLOW.md) | Product, availability, cart verification, and manual handoff limitations. |
+| [2captcha policy and accounting](BROWSER-2CAPTCHA.md) | Explicit paid-solve authorization, private ledger, and reconciliation. |
 | [Operations guide](BROWSER-OPERATIONS.md) | Installation, migration, updates, rollback, and verification procedures. |
-| [Proxy pool specification](BROWSER-PROXY-SPEC.md) | Proposed persistent sessions, proxy rotation, safety, and acceptance criteria. |
-| [Proxy pool low-level design](BROWSER-PROXY-LLD.md) | Proposed storage, lifecycle, routing, integration, and test design. |
+| [Proxy pool specification](BROWSER-PROXY-SPEC.md) | Implemented persistent sessions, proxy rotation, safety, and acceptance criteria; Linux headless and Xvfb remain unverified. |
+| [Proxy pool low-level design](BROWSER-PROXY-LLD.md) | Implemented storage, lifecycle, routing, integration, and test design; see specification for qualification limits. |

@@ -6,6 +6,7 @@ import {
   bindAuthRecord,
   BrowserSessionError,
   createSession,
+  diagnoseSessions,
   listSessions,
   reconcileCursor,
   reconcileSession,
@@ -22,6 +23,7 @@ function usage() {
     "Commands:",
     "  create [session] [--session <name>]",
     "  list",
+    "  doctor (read-only local checks; no network requests)",
     "  show [session] [--session <name>]",
     "  bind-auth [session] <auth-record> [--session <name>] [--name <auth-record>]",
     "  unbind-auth [session] <auth-record> [--session <name>] [--name <auth-record>]",
@@ -70,9 +72,9 @@ function parseCliArgs(argv) {
   return { command, opts };
 }
 
-function loadConfigForSessions(configDir) {
+function loadConfigForSessions(configDir, env) {
   const config = browserConfigFromEnv({
-    ...process.env,
+    ...env,
     PROMETHEUS_CONFIG_DIR: configDir,
   });
   if (!config?.proxy) {
@@ -94,7 +96,7 @@ export async function runBrowserSessionsCli(argv, env = process.env) {
 
   let loadedConfig = null;
   const getConfig = () => {
-    if (!loadedConfig) loadedConfig = loadConfigForSessions(configDir);
+    if (!loadedConfig) loadedConfig = loadConfigForSessions(configDir, env);
     return loadedConfig;
   };
   const resolveSessionArg = (explicit) => {
@@ -125,6 +127,11 @@ export async function runBrowserSessionsCli(argv, env = process.env) {
     } else if (command === "list") {
       if (opts.positional.length > 0) throw new BrowserSessionError("list takes no positional arguments");
       result = listSessions(configDir);
+    } else if (command === "doctor") {
+      if (opts.positional.length > 0 || opts.session || opts.name || opts.proxyId || opts.retainAssociations) {
+        throw new BrowserSessionError("doctor takes only --config-dir; it inspects all sessions and the configured pool");
+      }
+      result = diagnoseSessions(configDir, getConfig());
     } else if (command === "show") {
       result = showSession(configDir, resolveSessionArg(opts.session ?? opts.positional[0]));
     } else if (command === "bind-auth") {
@@ -157,7 +164,7 @@ export async function runBrowserSessionsCli(argv, env = process.env) {
       ? result.warnings.map((w) => `warning: ${w}`).join("\n") + "\n"
       : "";
     return {
-      status: 0,
+      status: command === "doctor" && !result.ok ? 1 : 0,
       stdout: JSON.stringify(result, null, 2) + "\n",
       ...(stderr ? { stderr } : {}),
     };

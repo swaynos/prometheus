@@ -9,9 +9,12 @@ import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { loadStateForOrigin, listStates } from "./opencode-browser-state.mjs";
 import { browserConfigFromEnv, browserLaunchOptions, browserRuntimeInfo, createTaskContext, hydrateBrowserState } from "./opencode-browser-runtime.mjs";
-import { getSessionAuthRecords, sanitizePoolProxyError } from "./opencode-browser-sessions.mjs";
+import { getSessionAuthRecords, sanitizePoolProxyError, verifyTaskSessionOwner } from "./opencode-browser-sessions.mjs";
 import { enterTaskDisplay } from "./opencode-browser-service.mjs";
 import { humanClick, humanType, applyNavigationDelay } from "./opencode-browser-humanize.mjs";
+import { inspectTurnstileLifecycle } from "./opencode-browser-challenge.mjs";
+import { createTurnstileTask } from "./opencode-browser-2captcha.mjs";
+import { reserveBudget, settleBudget } from "./opencode-browser-budget.mjs";
 
 const TASK_CONFIG = browserConfigFromEnv();
 await enterTaskDisplay(TASK_CONFIG);
@@ -44,6 +47,10 @@ const toolDef = (name, description, properties = {}, required) => ({
 const TOOLS = [
   toolDef("browser_navigate", "Navigate to a URL. Optionally select a load event and wait for a visible readiness selector without fixed sleeps.", { url: { type: "string" }, wait_until: { type: "string", enum: WAIT_UNTIL_ENUM }, ready_selector: { type: "string" }, timeout: { type: "number", description: "Total navigation/readiness budget in seconds, bounded by the transport budget." }, humanize: { type: "boolean", description: "Simulate human behavior (2-4s settle delay post-navigation)." } }, ["url"]),
   toolDef("browser_status", "Return non-secret browser runtime and page health metadata."),
+  toolDef("browser_takeover", "Pause agent access to an existing explicitly headed managed task for user control; requires prior user consent.", { user_requested: { type: "boolean" } }, ["user_requested"]),
+  toolDef("browser_handback", "Resume after the user explicitly confirms handback; inspect the page before further actions.", { user_confirmed: { type: "boolean" } }, ["user_confirmed"]),
+  toolDef("browser_challenge_inspect", "Inspect the active page for a standalone Turnstile candidate. Never solves or retries; access-denied pages remain unsupported."),
+  toolDef("browser_challenge_solve", "Explicitly authorize one paid standalone Turnstile solve under the configured origin and durable budget policy; never called by navigation.", { authorize_paid: { type: "boolean" }, max_cost_usd: { type: "number", exclusiveMinimum: 0 }, max_tasks: { type: "integer", minimum: 1 } }, ["authorize_paid", "max_cost_usd", "max_tasks"]),
   toolDef("browser_navigate_back", "Go back in history."),
   toolDef("browser_forward", "Go forward in history."),
   toolDef("browser_reload", "Reload the current page after allowing in-flight network requests to settle.", { wait_until: { type: "string", enum: WAIT_UNTIL_ENUM }, timeout: { type: "number", description: "Total reload budget in seconds, bounded by the transport budget." } }),
@@ -112,8 +119,19 @@ const hydratedOrigins = new Map();
 const verifiedOrigins = new Set();
 const frameIds = new Map();
 const references = new Map();
+const navigationStatuses = new WeakMap();
+const pendingNavigationResponses = new WeakMap();
 let refCounter = 0;
 let activeRequest = null;
+let bindingRevision = 0;
+let humanControl = null;
+let inspectionRequired = false;
+let handbackPage = null;
+let sessionLost = false;
+let takeoverLost = false;
+let recoveryRequired = false;
+const privateOutputValues = new Set();
+function protectOutput(value) { if (typeof value === 'string' && value) privateOutputValues.add(value); }
 
 function frameId(frame) {
   if (!frameIds.has(frame)) frameIds.set(frame, `f${frameIds.size + 1}-${randomUUID().slice(0, 8)}`);
@@ -133,10 +151,37 @@ function invalidateFrame(frame) {
 
 function registerPage(page) {
   if (pages.includes(page)) return;
+  bindingRevision++;
   pages.push(page);
-  page.on("framenavigated", invalidateFrame);
+  page.on("request", request => {
+    try {
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        bindingRevision++;
+        navigationStatuses.delete(page);
+        pendingNavigationResponses.delete(page);
+      }
+    } catch { /* Detached frames cannot establish navigation evidence. */ }
+  });
+  page.on("response", response => {
+    try {
+      if (response.request().isNavigationRequest() && response.frame() === page.mainFrame()) {
+        const evidence = { url: response.url(), status: response.status() };
+        pendingNavigationResponses.set(page, evidence);
+      }
+    } catch { /* A detached frame is not evidence. */ }
+  });
+  page.on("framenavigated", frame => {
+    invalidateFrame(frame);
+    if (frame === page.mainFrame()) {
+      bindingRevision++;
+      const evidence = pendingNavigationResponses.get(page);
+      navigationStatuses.delete(page);
+      if (evidence?.url === frame.url()) navigationStatuses.set(page, evidence.status);
+      pendingNavigationResponses.delete(page);
+    }
+  });
   page.on("framedetached", frame => { invalidateFrame(frame); frameIds.delete(frame); });
-  page.on("close", () => { for (const frame of page.frames()) { invalidateFrame(frame); frameIds.delete(frame); } });
+  page.on("close", () => { bindingRevision++; for (const frame of page.frames()) { invalidateFrame(frame); frameIds.delete(frame); } });
   page.on("console", (msg) => {
     if (consoleMessages.length < 500) {
       consoleMessages.push(sanitizePoolProxyError(`[${msg.type()}] ${msg.text()}`, TASK_CONFIG));
@@ -145,6 +190,8 @@ function registerPage(page) {
 }
 
 async function ensureContext() {
+  if (sessionLost) await closeBrowser({ preserveTakeoverLoss: true });
+  if (takeoverLost) throw new Error("original human-control session lost; close the task before starting a new session");
   if (context) return context;
   if (!chromium) ({ chromium } = await import("playwright"));
   ({
@@ -154,14 +201,32 @@ async function ensureContext() {
     proxySession = null,
     proxyRelay = null,
   } = await createTaskContext(chromium, TASK_CONFIG, undefined, { configDir: CONFIG_DIR }));
+  const ownerContext = context, ownerBrowser = browser;
+  const lost = () => {
+    if (context !== ownerContext || browser !== ownerBrowser) return;
+    sessionLost = true;
+    recoveryRequired = true;
+    if (humanControl || inspectionRequired) takeoverLost = true;
+    bindingRevision++;
+    activeRequest?.controller.abort();
+  };
+  ownerContext.once("close", lost);
+  ownerBrowser.once("disconnected", lost);
+  try {
   context.setDefaultTimeout(DEFAULT_TIMEOUT);
   pages = [];
-  context.on("page", registerPage);
-  const existing = typeof context.pages === "function" ? context.pages() : [];
+  const attached = TASK_CONFIG.executionMode === "external-cdp" && Boolean(TASK_CONFIG.cdpOptions?.endpoint);
+  if (!attached) context.on("page", registerPage);
+  const existing = !attached && typeof context.pages === "function" ? context.pages() : [];
   if (existing.length) for (const p of existing) registerPage(p);
   else registerPage(await context.newPage());
   activeIndex = 0;
+  if (sessionLost || !ownerBrowser.isConnected()) throw new Error("task context lost during initialization; request a fresh navigation");
   return context;
+  } catch (error) {
+    await closeBrowser({ preserveTakeoverLoss: true });
+    throw error;
+  }
 }
 
 function activePage() {
@@ -178,8 +243,16 @@ async function ensureActivePage() {
   return pages[activeIndex];
 }
 
-async function closeBrowser() {
+async function closeBrowser({ preserveTakeoverLoss = false } = {}) {
+  bindingRevision++;
+  humanControl = null;
+  inspectionRequired = false;
+  handbackPage = null;
+  sessionLost = false;
+  if (!preserveTakeoverLoss) takeoverLost = false;
+  if (!preserveTakeoverLoss) recoveryRequired = false;
   const toClose = browser;
+  const ownedPages = TASK_CONFIG.executionMode === "external-cdp" && TASK_CONFIG.cdpOptions?.endpoint ? pages.slice() : [];
   browser = null;
   context = null;
   resolvedRuntime = null;
@@ -192,6 +265,7 @@ async function closeBrowser() {
   references.clear();
   frameIds.clear();
   consoleMessages.length = 0;
+  for (const page of ownedPages) { try { await page.close(); } catch {} }
   if (toClose) { try { await toClose.close(); } catch {} }
 }
 
@@ -496,6 +570,84 @@ async function navigationClassification(page, status, timeout = DEFAULT_TIMEOUT)
   return denied ? ", access denied" : status && status >= 400 ? ", HTTP error" : "";
 }
 
+// A Chrome error-document commit can interrupt goto while the requested document's
+// response is still arriving. Track only requests started for this invocation,
+// including their redirect chain; never reuse the previous document's status.
+function observeRequestedNavigation(page, url) {
+  let expected;
+  try { const parsed = new URL(url); parsed.hash = ""; expected = parsed.href; } catch { return null; }
+  const requests = new Set();
+  let status = null;
+  let notify = null;
+  const onRequest = request => {
+    try {
+      if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) return;
+      const parsed = new URL(request.url()); parsed.hash = "";
+      if (requests.has(request.redirectedFrom()) || (!requests.size && parsed.href === expected)) requests.add(request);
+    } catch { /* Detached frames and non-URL requests cannot establish evidence. */ }
+  };
+  const onResponse = response => {
+    if (!requests.has(response.request())) return;
+    status = response.status();
+    if (status >= 300 && status < 400) return;
+    notify?.();
+  };
+  page.on("request", onRequest);
+  page.on("response", onResponse);
+  return {
+    get status() { return status; },
+    async waitForResponse(timeout) {
+      if (status !== null && (status < 300 || status >= 400)) return;
+      await new Promise(resolve => {
+        const timer = setTimeout(resolve, timeout);
+        notify = () => { clearTimeout(timer); resolve(); };
+      });
+    },
+    close() { page.off("request", onRequest); page.off("response", onResponse); notify = null; },
+  };
+}
+
+async function runObservedNavigation(page, url, remaining, navigate) {
+  const observation = observeRequestedNavigation(page, url);
+  try {
+    return await navigate();
+  } catch (error) {
+    if (observation && /interrupted by another navigation|ERR_INVALID_AUTH_CREDENTIALS/i.test(String(error?.message)) && !proxyRelay?.getLastFailure()) {
+      await observation.waitForResponse(Math.min(500, remaining()));
+    }
+    if (!proxyRelay?.getLastFailure() && (observation?.status === 401 || observation?.status === 403)) {
+      throw new Error(`access denied: requested document returned HTTP ${observation.status}; do not retry automatically`);
+    }
+    throw error;
+  } finally { observation?.close(); }
+}
+
+// Playwright does not expose history entries. Chromium's local CDP session can
+// identify the intended history URL without making a request or changing mode.
+// Other engines and unavailable sessions keep the existing generic-error path.
+async function historyTarget(page, delta) {
+  let session;
+  try {
+    const currentUrl = page.url();
+    session = await page.context().newCDPSession(page);
+    const { currentIndex, entries } = await session.send("Page.getNavigationHistory");
+    if (page.url() !== currentUrl || entries[currentIndex]?.url !== currentUrl) return null;
+    return entries[currentIndex + delta]?.url ?? null;
+  } catch { return null; }
+  finally { await session?.detach().catch(() => {}); }
+}
+
+async function navigateHistory(page, delta) {
+  const target = await historyTarget(page, delta);
+  const started = Date.now();
+  const remaining = () => Math.max(1, DEFAULT_TIMEOUT - (Date.now() - started));
+  const response = await runObservedNavigation(page, target, remaining, () => delta < 0 ? page.goBack() : page.goForward());
+  const status = response?.status() ?? null;
+  if (status === 407 || proxyRelay?.getLastFailure()) throw classifyProxyError(new Error("proxy failure"), status);
+  const classification = response ? await navigationClassification(page, status, remaining()) : "";
+  return text(`${delta < 0 ? "back" : "forward"} to ${page.url()}${classification ? ` (status ${status}${classification})` : ""}`);
+}
+
 const text = (value) => ({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }] });
 
 function withDownloadTimeout(promise) {
@@ -566,14 +718,105 @@ function classifyProxyError(error, status = null) {
   if (/ERR_PROXY_CONNECTION_FAILED|ERR_TUNNEL_CONNECTION_FAILED/i.test(sanitized)) {
     return new Error("proxy connection failed; do not retry automatically or fall back to direct connection");
   }
-  if (/ERR_INVALID_AUTH_CREDENTIALS/i.test(sanitized)) {
-    return new Error("access denied: destination requires HTTP authentication");
-  }
   return new Error(sanitized || "browser operation failed");
 }
 
 const HANDLERS = {
+  async browser_takeover(args) {
+    if (args.user_requested !== true || Object.keys(args).some(k => k !== "user_requested")) throw new Error("explicit user request required");
+    if (TASK_CONFIG.executionMode !== "headed") throw new Error("manual takeover requires a task started in headed mode; no conversion is supported");
+    if (humanControl || inspectionRequired) throw new Error("takeover unavailable until current handback inspection is complete");
+    const page = activePage();
+    if (!browser?.isConnected() || !context || page.isClosed()) throw new Error("task context unavailable");
+    if (TASK_CONFIG.proxy) verifyTaskSessionOwner(CONFIG_DIR, TASK_CONFIG, proxySession?.generation, proxySession?.ownerId);
+    humanControl = { browser, context, page, generation: proxySession?.generation };
+    for (const frame of page.frames()) invalidateFrame(frame);
+    frameIds.clear();
+    return text({ status: "human_control", note: "Pause agent actions and end the turn; the user controls the existing page." });
+  },
+  async browser_handback(args) {
+    if (args.user_confirmed !== true || Object.keys(args).some(k => k !== "user_confirmed")) throw new Error("explicit user-confirmed handback required");
+    if (!humanControl) throw new Error("no human takeover is active");
+    const owner = humanControl;
+    if (browser !== owner.browser || context !== owner.context || !browser?.isConnected() || owner.page.isClosed() || pages[activeIndex] !== owner.page) throw new Error("original task page or context unavailable; close the task");
+    if (TASK_CONFIG.proxy) verifyTaskSessionOwner(CONFIG_DIR, TASK_CONFIG, owner.generation, proxySession?.ownerId);
+    for (const p of pages) for (const frame of p.frames()) invalidateFrame(frame);
+    frameIds.clear();
+    consoleMessages.length = 0;
+    verifiedOrigins.clear();
+    bindingRevision++;
+    humanControl = null;
+    inspectionRequired = true;
+    handbackPage = owner.page;
+    return text({ status: "inspection_required", note: "Inspect the original page before further actions." });
+  },
+  async browser_challenge_inspect() {
+    const page = activePage();
+    const status = navigationStatuses.get(page);
+    if (status === undefined || status >= 400 || !/^https?:\/\//i.test(page.url())) return text({ status: "unsupported", reason: "navigation_denied_or_unverified" });
+    try {
+      const result = await page.evaluate(() => {
+        const title = document.title || "";
+        const body = document.body?.innerText || "";
+        const challengeTitle = /^(?:just a moment[.!\s…]*|checking your browser.*|attention required.*cloudflare.*|verify (?:that )?you are human[.!\s]*)$/i.test(title.trim());
+        if ((challengeTitle && /checking your browser|verify (?:that )?you are human|performing security verification|enable javascript and cookies to continue/i.test(body)) || document.querySelector('iframe[src*="/cdn-cgi/challenge-platform/"], form[action*="/cdn-cgi/challenge-platform/"]')) return { status: "unsupported", reason: "access_denial_or_managed_challenge" };
+        const widgets = [...document.querySelectorAll('.cf-turnstile')];
+        if (!widgets.length) return { status: "not_detected" };
+        if (widgets.length !== 1) return { status: "unsupported", reason: "ambiguous_widgets" };
+        const widget = widgets[0];
+        const rect = widget.getBoundingClientRect();
+        if (!rect.width || !rect.height || getComputedStyle(widget).visibility !== 'visible' || !widget.getAttribute('data-sitekey') || !widget.getAttribute('data-callback') || widget.hasAttribute('data-action') || widget.hasAttribute('data-cdata') || widget.hasAttribute('data-chl-page-data')) return { status: "unsupported", reason: "unverified_widget" };
+        return { status: "candidate", type: "standalone_turnstile", solve_available: false };
+      });
+      if (result.status === 'candidate' && TASK_CONFIG.captcha?.policy) {
+        try { result.solve_available = TASK_CONFIG.captcha.policy.sites.some(site => site.origin === new URL(page.url()).origin); } catch {}
+      }
+      return text(result);
+    } catch { return text({ status: "unsupported", reason: "inspection_interrupted" }); }
+  },
+  async browser_challenge_solve(args) {
+    if (args.authorize_paid !== true || !Number.isFinite(args.max_cost_usd) || args.max_cost_usd <= 0 || !Number.isSafeInteger(args.max_tasks) || args.max_tasks < 1) return text({ status: "not_submitted", reason: "explicit_authorization_and_limits_required" });
+    const config = TASK_CONFIG.captcha, policy = config?.policy;
+    if (!policy) return text({ status: "not_submitted", reason: config ? "budget_enforcement_unavailable" : "disabled" });
+    if (TASK_CONFIG.executionMode === 'external-cdp') return text({ status: 'not_submitted', reason: 'unowned_context' });
+    if (Math.floor(args.max_cost_usd * 1000000) < policy.estimateMicros) return text({ status: "not_submitted", reason: "limit_too_low" });
+    let page, site, status;
+    try {
+      page = activePage(); status = navigationStatuses.get(page);
+      site = policy.sites.find(s => s.origin === new URL(page.url()).origin);
+    } catch {}
+    if (!page || !site || !Number.isInteger(status) || status < 200 || status >= 400) return text({ status: "not_submitted", reason: "origin_or_document_not_approved" });
+    const ownerContext = context, ownerPage = page, proxyGeneration = proxySession?.generation;
+    const getBinding = () => {
+      if (context !== ownerContext || pages[activeIndex] !== ownerPage) return 'invalid';
+      if (TASK_CONFIG.proxy) {
+        try { if (getSessionAuthRecords(CONFIG_DIR, TASK_CONFIG.proxy.session).generation !== proxyGeneration) return 'invalid'; }
+        catch { return 'invalid'; }
+      }
+      return String(bindingRevision);
+    };
+    if (getBinding() === 'invalid') return text({ status: 'not_submitted', reason: 'binding_unavailable' });
+    let id;
+    try {
+      const lifecycle = await inspectTurnstileLifecycle({ page, context: ownerContext, getBinding, navigationStatus: status, acceptSelector: site.acceptSelector, timeoutMs: Math.min(config.timeoutMs, MAX_WAIT_MS), signal: activeRequest?.signal });
+      const result = await lifecycle.solve({
+        authorizePaid: true, maxCostUsd: args.max_cost_usd, maxTasks: args.max_tasks,
+        signal: activeRequest?.signal,
+        authorize: async () => true,
+        createProvider: task => {
+          protectOutput(task.websiteKey);
+          id = createHash('sha256').update(JSON.stringify([task.websiteURL, task.websiteKey])).digest('hex');
+          return createTurnstileTask(config, task);
+        },
+        reserve: ({ signal }) => reserveBudget(policy.ledgerDir, { id, estimate: policy.estimateMicros, dailyTasks: policy.dailyTasks, lifetimeTasks: policy.lifetimeTasks, dailyMicros: policy.dailyMicros, lifetimeMicros: policy.lifetimeMicros, signal }),
+        onReceipt: async cost => { if (cost !== null && !await settleBudget(policy.ledgerDir, id, cost)) throw new Error('accounting unavailable'); },
+        protectToken: protectOutput,
+      });
+      return text(result);
+    } catch { return text({ status: 'not_submitted', reason: 'unsupported_or_interrupted', outcome: 'not-submitted' }); }
+  },
   async browser_status() {
+    if (humanControl || inspectionRequired) return text({ runtime: SERVER_INFO.name, mode: TASK_CONFIG.executionMode, control: humanControl ? "human" : "inspection_required", contextOpen: Boolean(context && browser?.isConnected()), pageOpen: Boolean((humanControl?.page || handbackPage) && !(humanControl?.page || handbackPage).isClosed()) });
     const page = pages[activeIndex];
     const pageOpen = Boolean(page && !page.isClosed());
     let origin = null;
@@ -602,8 +845,11 @@ const HANDLERS = {
       launchOptions: browserLaunchOptions(TASK_CONFIG),
       browserVersion: browser?.version() ?? null,
       contextOpen: Boolean(context),
+      ...(takeoverLost ? { control: "session_lost" } : {}),
+      ...(recoveryRequired ? { recovery: "explicit_navigation_required" } : {}),
       pageOpen,
       humanize: SESSION_CONFIG.humanize,
+      ...(inspectionRequired ? { control: "inspection_required" } : {}),
       url: pageOpen ? page.url() : null,
       hydratedAuthentication: Boolean(origin && verifiedOrigins.has(origin)),
       authenticationVerification: origin && hydratedOrigins.has(origin)
@@ -617,11 +863,12 @@ const HANDLERS = {
     if (args.ready_selector !== undefined && (typeof args.ready_selector !== "string" || !args.ready_selector.trim())) throw new Error("ready_selector must be nonempty text");
     const budget = args.timeout !== undefined || args.ready_selector !== undefined ? boundedWaitMs(args.timeout) : DEFAULT_TIMEOUT;
     await ensureContext();
+    recoveryRequired = false;
     const hydration = await maybeHydrate(args.url);
     const page = await ensureActivePage();
     const started = Date.now();
     const remaining = () => Math.max(1, budget - (Date.now() - started));
-    const resp = await page.goto(args.url, { waitUntil, timeout: budget });
+    const resp = await runObservedNavigation(page, args.url, remaining, () => page.goto(args.url, { waitUntil, timeout: budget }));
     const status = resp ? resp.status() : null;
     if (status === 407 || proxyRelay?.getLastFailure()) {
       throw classifyProxyError(new Error("proxy failure"), status);
@@ -643,12 +890,10 @@ const HANDLERS = {
     return text(`navigated to ${page.url()} (status ${status ?? "n/a"}${classification})${hydration?.method === "user-confirmed" ? "; user-confirmed state loaded: verify account or requested task access in this context before claiming login success" : ""}`);
   },
   async browser_navigate_back() {
-    await activePage().goBack();
-    return text(`back to ${activePage().url()}`);
+    return navigateHistory(activePage(), -1);
   },
   async browser_forward() {
-    await activePage().goForward();
-    return text(`forward to ${activePage().url()}`);
+    return navigateHistory(activePage(), 1);
   },
   async browser_reload(args = {}) {
     const waitUntil = args.wait_until === undefined ? "load" : args.wait_until;
@@ -658,7 +903,7 @@ const HANDLERS = {
     const started = Date.now();
     const remaining = () => Math.max(1, budget - (Date.now() - started));
     await page.waitForLoadState("networkidle", { timeout: Math.min(2000, remaining()) }).catch(() => {});
-    const resp = await page.reload({ waitUntil, timeout: remaining() });
+    const resp = await runObservedNavigation(page, page.url(), remaining, () => page.reload({ waitUntil, timeout: remaining() }));
     const status = resp ? resp.status() : null;
     if (status === 407 || proxyRelay?.getLastFailure()) {
       throw classifyProxyError(new Error("proxy failure"), status);
@@ -1061,14 +1306,29 @@ const HANDLERS = {
     return text(`media saved to ${destination} (${media.width}x${media.height}, ${saved.bytes} bytes, sha256 ${saved.sha256}, source sha256 ${sourceSha256})`);
   },
   async browser_tab_new(args) {
+    bindingRevision++;
+    if (recoveryRequired) throw new Error("task session lost; request a fresh browser_navigate or close the task");
     await ensureContext();
     const page = await context.newPage();
     registerPage(page);
     activeIndex = pages.indexOf(page);
     if (typeof args.url === "string") {
       const hydration = await maybeHydrate(args.url);
-      await page.goto(args.url, { waitUntil: "load" });
+      const started = Date.now();
+      const remaining = () => Math.max(1, DEFAULT_TIMEOUT - (Date.now() - started));
+      let response;
+      try {
+        response = await runObservedNavigation(page, args.url, remaining, () => page.goto(args.url, { waitUntil: "load", timeout: remaining() }));
+      } catch (error) {
+        if (proxyRelay?.getLastFailure()) throw classifyProxyError(error);
+        throw new Error(`tab ${activeIndex} created; navigation did not complete (outcome unknown): ${error.message}`);
+      }
+      const status = response?.status() ?? null;
+      if (status === 407 || proxyRelay?.getLastFailure()) throw classifyProxyError(new Error("proxy failure"), status);
+      const classification = await navigationClassification(page, status, remaining());
+      if (classification) return text(`tab ${activeIndex} created; navigation to ${page.url()} (status ${status ?? "n/a"}${classification})`);
       await verifyHydratedAccount(page, hydration);
+      return text(`opened tab ${activeIndex} (status ${status ?? "n/a"})`);
     }
     return text(`opened tab ${activeIndex}`);
   },
@@ -1078,10 +1338,11 @@ const HANDLERS = {
   },
   async browser_tab_switch(args) {
     if (!pages[args.index]) throw new Error(`no tab at index ${args.index}`);
-    activeIndex = args.index;
+    bindingRevision++; activeIndex = args.index;
     return text(`active tab ${activeIndex}`);
   },
   async browser_tab_close(args) {
+    bindingRevision++;
     const index = Number.isFinite(args.index) ? args.index : activeIndex;
     const page = pages[index];
     if (!page) throw new Error(`no tab at index ${index}`);
@@ -1103,7 +1364,18 @@ const HANDLERS = {
   },
 };
 
-const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
+const send = (message) => {
+  const serialized = JSON.stringify(message, (_key, value) => {
+    if (typeof value !== 'string') return value;
+    for (const secret of privateOutputValues) {
+      value = value.replaceAll(secret, '[REDACTED]');
+      const escaped = JSON.stringify(secret).slice(1, -1);
+      if (escaped !== secret) value = value.replaceAll(escaped, '[REDACTED]');
+    }
+    return value;
+  });
+  process.stdout.write(`${serialized}\n`);
+};
 const reply = (id, result) => { if (id !== undefined && id !== null) send({ jsonrpc: "2.0", id, result }); };
 const replyError = (id, message) => {
   if (id !== undefined && id !== null) send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: message }], isError: true } });
@@ -1119,6 +1391,11 @@ async function handle(message) {
     const name = params?.name;
     const args = params?.arguments || {};
     if (!TOOL_NAMES.has(name)) return replyError(id, `unknown tool: ${name}`);
+    if (sessionLost) await closeBrowser({ preserveTakeoverLoss: true });
+    if (takeoverLost && !["browser_status", "browser_close"].includes(name)) return replyError(id, "original human-control session lost; close the task before starting a new session");
+    if (humanControl && !["browser_status", "browser_close", "browser_handback"].includes(name)) return replyError(id, "human control active; agent access is paused");
+    if (inspectionRequired && !["browser_status", "browser_close", "browser_snapshot"].includes(name)) return replyError(id, "inspect the original page with browser_snapshot before further actions");
+    if (inspectionRequired && name === "browser_snapshot" && (args.frame !== undefined || handbackPage?.isClosed() || pages[activeIndex] !== handbackPage)) return replyError(id, "original page inspection unavailable; close the task");
     const controller = new AbortController();
     activeRequest = { id, controller, signal: controller.signal };
     if (name !== "browser_status" && name !== "browser_close") proxyRelay?.clearLastFailure();
@@ -1127,6 +1404,7 @@ async function handle(message) {
       if (name !== "browser_status" && name !== "browser_close" && proxyRelay?.getLastFailure()) {
         throw classifyProxyError(new Error("proxy failure"));
       }
+      if (inspectionRequired && name === "browser_snapshot" && !result.isError) { inspectionRequired = false; handbackPage = null; }
       reply(id, result);
     } catch (err) {
       replyError(id, `${name} failed: ${classifyProxyError(err).message}`);
@@ -1143,6 +1421,10 @@ reader.on("line", (line) => {
   if (!line.trim()) return;
   let message;
   try { message = JSON.parse(line); } catch { return; }
+  if (humanControl && message.method === "tools/call" && !["browser_status", "browser_close", "browser_handback"].includes(message.params?.name)) {
+    replyError(message.id, "human control active; agent access is paused");
+    return;
+  }
   if (message.method === "notifications/cancelled") {
     if (activeRequest?.id === message.params?.requestId) activeRequest.controller.abort();
     return;
@@ -1152,7 +1434,7 @@ reader.on("line", (line) => {
     process.stderr.write(`prometheus-browser: handler error: ${safe}\n`);
   });
 });
-reader.on("close", () => { queue = queue.then(() => closeBrowser()).finally(() => process.exit(0)); });
+reader.on("close", () => { activeRequest?.controller.abort(); queue = queue.then(() => closeBrowser()).finally(() => process.exit(0)); });
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.once(signal, () => { void closeBrowser().finally(() => process.exit(signal === "SIGINT" ? 130 : 143)); });
+  process.once(signal, () => { activeRequest?.controller.abort(); void queue.then(() => closeBrowser()).finally(() => process.exit(signal === "SIGINT" ? 130 : 143)); });
 }

@@ -2,7 +2,7 @@
 
 **Status:** Implemented (`scripts/opencode-browser-sessions.mjs`, `scripts/browser-sessions.mjs`, `npm run browser:sessions`).
 
-**Requirements:** [Browser Proxy Pool Specification](BROWSER-PROXY-SPEC.md). This document proposes implementation details; the specification controls in case of conflict.
+**Requirements:** [Browser Proxy Pool Specification](BROWSER-PROXY-SPEC.md). This document describes implementation details; the specification controls in case of conflict.
 
 ## 1. Current integration points
 
@@ -12,11 +12,11 @@
 - `scripts/opencode-browser-state.mjs` owns origin-scoped private authentication records. Its record name is not a browser-session name.
 - `scripts/browser-profile.mjs` owns the staged runtime inventory and runs an installation probe that serializes browser configuration. New files and secret-handling rules must be accounted for there.
 
-The existing modifications in the working tree are not part of this proposal to replace or discard. Preserve their interfaces and behavior.
+Preserve existing browser, authentication, and transfer interfaces and safeguards.
 
 ## 2. Configuration and validation
 
-Extend the top-level browser configuration with the following proposed shape:
+The top-level browser configuration accepts the following shape:
 
 ```json
 {
@@ -41,7 +41,7 @@ No `proxy` key means existing behavior. A present `proxy` requires a configurati
 
 ## 3. Persistent registry
 
-Add a private session module and a registry beneath the configuration directory, separate from `prometheus-sessions/` authentication records. Example logical structure:
+The private session module stores a registry beneath the configuration directory, separate from `prometheus-sessions/` authentication records. Example logical structure:
 
 ```json
 {
@@ -80,11 +80,12 @@ The ownership mechanism must account for an active login helper if its task owne
 
 ## 5. Session management interface
 
-Add a dedicated CLI and package entry, with final flag syntax documented before release. Intended operations:
+The dedicated CLI is available through the package entry. Supported operations:
 
 ```sh
 npm run browser:sessions -- create [shopping]
 npm run browser:sessions -- list
+npm run browser:sessions -- doctor
 npm run browser:sessions -- show [shopping]
 npm run browser:sessions -- bind-auth [shopping] <auth-record>
 npm run browser:sessions -- unbind-auth [shopping] <auth-record>
@@ -93,14 +94,18 @@ npm run browser:sessions -- reconcile-cursor <proxy-id>
 npm run browser:sessions -- reconcile-session [shopping] [proxy-id] [--retain-associations]
 ```
 
-(Each command also accepts explicit `--session <name>`, `--name <auth-record>`, `--proxy-id <id>`, and `--config-dir <dir>` flags.)
+Commands accept the applicable `--session <name>`, `--name <auth-record>`, and `--proxy-id <id>` flags, plus `--config-dir <dir>`. `doctor` accepts only `--config-dir` and checks all registered sessions and configured pool entries.
 
-Create reserves a proxy under the registry lock. Show/list are read-only and sanitized. Bind verifies that the existing authentication record exists and changes only associations, not saved state. Rotate requires an inactive session, atomically allocates the next proxy, increments generation, and clears authentication associations by default. Provide an explicit retain-associations option with a warning. Configuration chooses the session; an in-flight browser does not change session when configuration changes.
+Create reserves a proxy under the registry lock. Show/list return sanitized metadata without advancing the cursor; list is read-only, while show can prune dead ownership records. Bind verifies that the existing authentication record exists and changes only associations, not saved state. Rotate requires an inactive session, atomically allocates the next proxy, increments generation, and clears authentication associations by default. Provide an explicit retain-associations option with a warning. Configuration chooses the session; an in-flight browser does not change session when configuration changes.
+
+Rotation uses the global cursor, not a per-session successor, and may select the current proxy again (including in single-member pools). Generation and association-reset rules still apply. `reconcile-session <session> <proxy-id>` explicitly chooses a configured pool member without advancing the cursor. A changed ID or endpoint increments generation, clears associations by default, and warns when `--retain-associations` is used; unchanged reconciliation is a no-op.
+
+`diagnoseSessions()` implements `doctor` without calling the pruning ownership inspectors or acquiring the registry lock. It uses strict file readers and liveness classification, reports only fixed codes and sanitized IDs/counts, and never repairs files. Credential values are validated privately and discarded. Active locks and dead records produce warnings; unsafe/corrupt state, ambiguous ownership, missing configured sessions, removed IDs, endpoint drift, and invalid credentials produce errors. CLI status is `1` for errors and `0` otherwise. Concurrent activity can invalidate the snapshot immediately; `ok` is not permission to rotate or proof of routing. Unlike `doctor`, `show` may prune conclusively dead ownership records as part of inspection; neither command changes the registry cursor.
 
 ## 6. Launch, login, and hydration
 
 1. Task startup validates configuration, acquires ownership, resolves the stored assignment against the configured pool, and reads credentials privately.
-2. Build an internal Playwright proxy option from the endpoint and optional credentials. Pass it at the appropriate launch/context layer for each qualified engine and managed mode. Keep it out of `browserRuntimeInfo`, `browser_status`, serializable configuration, generated launch summaries, and errors.
+2. Start an owner-local HTTP relay on `127.0.0.1` that injects upstream proxy authentication. Playwright receives only the relay URL in its launch proxy option, not upstream credentials. Keep upstream connection details out of `browserRuntimeInfo`, `browser_status`, serializable configuration, generated launch summaries, and errors.
 3. Create the browser and context. On failure, close partial resources and release ownership without changing the committed assignment.
 4. The login helper accepts a distinct browser-session selector and authenticated handoff, validates generation, resolves the same proxy, and uses the managed persistent-context path. Disable automatic CDP selection when proxying. Reject explicit external CDP with proxy configuration.
 5. Bind login capture to the session only after successful capture. Retain existing user approval, scoped state capture, private file handling, and task-context authentication verification.
@@ -132,6 +137,8 @@ Required coverage:
 - Staged install/update inventory, read-only installer probes, no rotation on status, and existing transfer and authentication regressions.
 
 Run `npm test`, `npm run test:controller`, and `PROMETHEUS_TEST_BROWSER_CHANNEL=chrome npm test`. Qualify Linux headless and virtual-display, plus macOS when available. Document engine and Playwright/browser versions; unavailable configurations are unverified. Include explicit provider-side rotating-IP limitations in operational guidance.
+
+`.github/workflows/browser-proxy.yml` runs proxy/session fixtures on Ubuntu 24.04 for Playwright Chromium and installed Chrome in headless and Xvfb virtual-display modes. `PROMETHEUS_TEST_PROXY_MODE` selects actual task launch mode; the login fixture also launches headed under Xvfb in virtual-display jobs. Separate virtual-display tests exercise the managed service launcher, concurrent displays, and cleanup. Tests report Node, platform/architecture, Playwright, channel, mode, and browser versions. Workflow definition alone does not qualify Linux: retain the unverified status until its runs are reviewed. These local fixtures do not qualify a real provider or an interactive human login desktop.
 
 ## 9. Delivery sequence
 

@@ -1,0 +1,47 @@
+name: Browser proxy qualification
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-proxy:
+    name: Linux / ${{ matrix.channel }} / ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [default, chrome]
+        mode: [headless, virtual-display]
+    env:
+      PROMETHEUS_TEST_BROWSER_CHANNEL: ${{ matrix.channel }}
+      PROMETHEUS_TEST_PROXY_MODE: ${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.2
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - if: matrix.channel == 'chrome'
+        run: npx playwright install chrome
+      - name: Install virtual display dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
+      - name: Headless proxy fixtures and session diagnostics
+        if: matrix.mode == 'headless'
+        run: node --test --test-timeout=300000 tests/integration/browser_sessions.test.mjs tests/integration/browser_proxy.test.mjs
+      - name: Virtual-display proxy fixtures and session diagnostics
+        if: matrix.mode == 'virtual-display'
+        run: xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24 -nolisten tcp' env PROMETHEUS_VIRTUAL_DISPLAY=1 node --test --test-timeout=300000 tests/integration/browser_sessions.test.mjs tests/integration/browser_proxy.test.mjs
+      - name: Controller regressions
+        if: matrix.channel == 'default' && matrix.mode == 'headless'
+        run: npm run test:controller
+      - name: Managed virtual-display launcher and cleanup
+        if: matrix.mode == 'virtual-display'
+        run: node --test --test-timeout=300000 tests/integration/browser_virtual_display.test.mjs

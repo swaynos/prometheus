@@ -1,6 +1,6 @@
 # Browser Proxy Pool Specification
 
-**Status:** Implemented (macOS Playwright Chromium and installed Google Chrome qualified locally; Linux headless and Xvfb virtual-display remain unverified pending Linux host execution).
+**Status:** Implemented (macOS Playwright Chromium and installed Google Chrome qualified locally; Linux headless and Xvfb virtual-display remain unverified until the qualification workflow has run successfully on a Linux host).
 
 **Associated design:** [Browser Proxy Low-Level Design](BROWSER-PROXY-LLD.md).
 
@@ -8,7 +8,7 @@
 
 Allow the managed Prometheus Browser to use a user-configured pool of proxies. A named browser session receives one proxy in round-robin order and retains it across browser closures, runtime restarts, and extended inactivity. Login, subsequent browsing, and supported browser-mediated transfers use that same assignment.
 
-This specification describes a planned addition. Existing browser tools, authentication safeguards, file-transfer validation, and non-proxy behavior remain in force.
+Existing browser tools, authentication safeguards, file-transfer validation, and non-proxy behavior remain in force.
 
 ## 2. Scope and terminology
 
@@ -28,7 +28,7 @@ Initial protocol support is HTTP proxies, with optional username/password authen
 2. Creating a browser session atomically assigns the next pool member and advances the persistent cursor. For `[A, B, C]`, successive allocations are A, B, C, A.
 3. Allocation is reserved even if a subsequent browser launch fails. Concurrent allocations must not lose or duplicate cursor updates, although wraparound can intentionally assign the same proxy to different sessions.
 4. Reopening a session reuses its assignment; browser closure, process restarts, elapsed time, tabs, requests, navigation, and login do not advance the cursor.
-5. Only explicit session creation or rotation advances the cursor. Rotation assigns the next proxy and creates a new generation; it is refused while the session has an active owner or login helper.
+5. Only explicit session creation or rotation advances the cursor. Rotation consumes the shared global cursor and creates a new generation; it is refused while the session has an active owner or login helper. Other allocations can bring the cursor back to that session's current proxy, and a single-member pool always selects the same proxy. Rotation does not guarantee a different endpoint or exit IP, even though generation and authentication-reset rules still apply.
 6. Reordering or extending the pool does not change an existing assignment. Removing the assigned proxy or changing its endpoint makes the session unavailable until explicit reconciliation or rotation. Credential replacement is allowed on the next launch without rotation.
 7. No operation silently skips an unhealthy proxy or falls back to a direct connection.
 
@@ -37,7 +37,7 @@ Initial protocol support is HTTP proxies, with optional username/password authen
 1. A proxy-enabled task browser selects a named session before starting. The selected generation remains fixed for its lifetime.
 2. A login helper joins the task session via an explicit handoff and uses the same assignment. It does not consume another proxy.
 3. Saved authentication and proxy assignments remain separate. Proxy-enabled sessions restore only explicitly associated authentication records, and only for their approved origins; all existing origin and verification safeguards apply.
-4. Rotation does not automatically carry authentication associations into the new generation. An explicit retention option may carry the associations, with a warning that the changed route may require renewed verification. Rotation never deletes or rewrites saved cookies.
+4. Rotation does not automatically carry authentication associations into the new generation. Reconciliation that changes the proxy ID or endpoint also clears associations by default. An explicit retention option may carry the associations, with a warning that the changed route may require renewed verification. Rotation and reconciliation never delete or rewrite saved cookies.
 5. Existing saved records are preserved. Enabling proxies requires explicit association before those records can be restored in a proxy-enabled session.
 6. Closing a browser releases runtime resources but neither deletes a session nor rotates its proxy.
 
@@ -54,6 +54,8 @@ Initial protocol support is HTTP proxies, with optional username/password authen
 
 Provide explicit commands to create, list, inspect, and rotate named browser sessions and to bind authentication records. Commands display only sanitized metadata. A session is selected by configuration; changes to that selection do not mutate a running browser.
 
+Provide a read-only `doctor` command for local registry, pool-assignment, credential-safety, lock, and ownership checks. This explicitly requested diagnostic may read and validate proxy credential files privately, but never returns their contents or paths. It does not read saved authentication state, acquire locks, create files, prune dead owners, repair state, launch browsers, or contact endpoints. Return fixed diagnostic codes and exit nonzero on detected errors. Results are a point-in-time local snapshot, not connectivity, exit-IP, or browser-readiness verification.
+
 The registry and credentials live outside repositories in owner-only storage. Rotation state survives restarts and is updated atomically with bounded concurrency control. Unsafe files, invalid configuration, corrupt state, and ambiguous ownership stop the operation; none authorize direct routing or silent recovery.
 
 Installer probes, validation, status, and list commands do not allocate a session or advance rotation. Installation and deployment are separate from implementation; stop active browser tasks and login helpers before staged deployment and restart.
@@ -67,6 +69,7 @@ Installer probes, validation, status, and list commands do not allocate a sessio
 - Credentials do not appear in model-facing output, errors, logs, or installer probes.
 - Existing non-proxy workflows and their tests continue to pass.
 - Controlled fixtures verify browser routing, authentication, CONNECT, transfers, failure handling, and staged installation. Linux and macOS qualification is reported separately; unavailable configurations are unverified, not passing.
+- Diagnostics leave file contents, permissions, ownership records, and the cursor unchanged, including with stale, unsafe, or corrupt state. Same-proxy and single-member rotations still increment generation and apply authentication-reset rules.
 
 ## 6. Limits and non-goals
 

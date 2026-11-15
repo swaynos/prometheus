@@ -8,6 +8,16 @@ import { spawnMcpClient as client } from "./helpers.mjs";
 
 function fixtureServer() {
   const httpServer = http.createServer((req, res) => {
+    if (req.url === "/turnstile-widget") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end('<!doctype html><title>Form</title><div class="cf-turnstile" style="width:300px;height:65px" data-sitekey="PRIVATE_SITE_KEY" data-callback="privateCallback"></div>');
+      return;
+    }
+    if (req.url === "/turnstile-docs") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end('<!doctype html><title>Integration guide</title><h1>Documentation: verify you are human</h1><p>Do not retry an access denied result.</p><div class="cf-turnstile" style="width:300px;height:65px" data-sitekey="PRIVATE_SITE_KEY" data-callback="privateCallback"></div>');
+      return;
+    }
     if (["/challenge", "/challenge-ok"].includes(req.url)) {
       res.writeHead(req.url === "/challenge" ? 403 : 200, { "content-type": "text/html" });
       res.end("<!doctype html><title>Just a moment...</title><h1>Checking your browser before accessing example.com</h1>");
@@ -59,6 +69,38 @@ function fixtureServer() {
     });
   });
 }
+
+test("challenge inspection is redacted and solving is fail-closed", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const c = client({ PROMETHEUS_CONFIG_DIR: "" });
+  try {
+    await c.call("browser_navigate", { url: `${base}/turnstile-widget` });
+    const inspected = c.textOf(await c.call("browser_challenge_inspect"));
+    assert.deepEqual(JSON.parse(inspected), { status: "candidate", type: "standalone_turnstile", solve_available: false });
+    assert.doesNotMatch(inspected, /PRIVATE_SITE_KEY|privateCallback/);
+    assert.equal(JSON.parse(c.textOf(await c.call("browser_challenge_solve", {}))).reason, "explicit_authorization_and_limits_required");
+    assert.deepEqual(JSON.parse(c.textOf(await c.call("browser_challenge_solve", { authorize_paid: true, max_cost_usd: 1, max_tasks: 1 }))), { status: "not_submitted", reason: "disabled" });
+    await c.call("browser_navigate", { url: `${base}/turnstile-docs` });
+    assert.equal(JSON.parse(c.textOf(await c.call("browser_challenge_inspect"))).status, "candidate");
+    await c.call("browser_navigate", { url: `data:text/html,${encodeURIComponent('<div class="cf-turnstile" style="width:300px;height:65px" data-sitekey="x" data-callback="cb"></div>')}` });
+    assert.equal(JSON.parse(c.textOf(await c.call("browser_challenge_inspect"))).reason, "navigation_denied_or_unverified");
+    await c.call("browser_navigate", { url: `${base}/challenge` });
+    assert.equal(JSON.parse(c.textOf(await c.call("browser_challenge_inspect"))).status, "unsupported");
+    await c.call("browser_navigate", { url: `${base}/challenge-ok` });
+    assert.equal(JSON.parse(c.textOf(await c.call("browser_challenge_inspect"))).status, "unsupported");
+  } finally { await c.call("browser_close"); c.close(); await new Promise(resolve => httpServer.close(resolve)); }
+});
+
+test("configured provider still rejects without durable budget and hides key path", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "browser-challenge-config-"));
+  await writeFile(path.join(root, "prometheus-browser.json"), JSON.stringify({ channel: "default", captcha: { enabled: true, provider: "2captcha", keyFile: "/private/secret-key-location", timeoutMs: 1000, pollIntervalMs: 10 } }));
+  const c = client({ PROMETHEUS_CONFIG_DIR: root });
+  try {
+    const result = c.textOf(await c.call("browser_challenge_solve", { authorize_paid: true, max_cost_usd: 1, max_tasks: 1 }));
+    assert.deepEqual(JSON.parse(result), { status: "not_submitted", reason: "budget_enforcement_unavailable" });
+    assert.doesNotMatch(c.textOf(await c.call("browser_status")), /secret-key-location/);
+  } finally { c.close(); await rm(root, { recursive: true, force: true }); }
+});
 
 async function stateConfig(base, selector) {
   const root = await mkdtemp(path.join(os.tmpdir(), "cuddly-browser-state-"));
@@ -127,6 +169,8 @@ test("Playwright MCP server drives a headless page over JSON-RPC", async () => {
     assert.ok(names.has("browser_navigate"), "exposes browser_navigate");
     assert.ok(names.has("browser_fill"), "exposes browser_fill");
     assert.ok(names.has("browser_status"), "exposes browser_status");
+    assert.equal(names.has("browser_cloudscraper_get"), false, "removed diagnostic is not exposed");
+    assert.equal((await c.call("browser_cloudscraper_get", { url: "https://example.com/" })).isError, true);
     // Security: no cookie/storage export tools are exposed.
     for (const leaky of ["browser_get_cookies", "browser_storage_state", "browser_network_requests", "browser_set_cookie", "browser_set_storage_state"]) {
       assert.ok(!names.has(leaky), `must not expose ${leaky}`);
