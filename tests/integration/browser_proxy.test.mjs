@@ -925,7 +925,10 @@ test(`${poolSource}: HTTPS CONNECT tunnel routes through authenticated proxy wit
     });
   };
 
-  const { browser, context, proxyRelay } = await createTaskContext(spkiChromium, cfg, undefined, { configDir: dir });
+  const { browser, context, proxyRelay, getCaptchaProxy } = await createTaskContext(spkiChromium, cfg, undefined, { configDir: dir });
+  assert.deepEqual(getCaptchaProxy(), { server: proxyUrl, credentials: proxyCreds });
+  const copy = getCaptchaProxy(); copy.credentials.password = "changed";
+  assert.deepEqual(getCaptchaProxy(), { server: proxyUrl, credentials: proxyCreds }, "solver receives a copy of the pinned upstream credentials, not the loopback relay");
   t.after(async () => { await browser.close().catch(() => {}); });
   t.diagnostic(JSON.stringify({
     platform: process.platform,

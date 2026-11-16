@@ -6,6 +6,7 @@ import {
   sanitizePoolProxyError,
   validateProxyConfig,
   verifySessionGeneration,
+  verifyTaskSessionOwner,
 } from "./opencode-browser-sessions.mjs";
 import path from "node:path";
 import os from "node:os";
@@ -858,7 +859,17 @@ export async function createTaskContext(chromium, config, engines, options = {})
               authRecords: proxySession.authRecords,
               ownerId: proxySession.ownerId,
             },
-            proxyRelay,
+             proxyRelay,
+             // Internal capability, not diagnostics. Never expose this return
+             // value to page JavaScript, MCP responses or logs.
+             getCaptchaProxy() {
+               if (!browser.isConnected()) throw new Error("proxy task is closed");
+               verifyTaskSessionOwner(configDir, selected, proxySession.generation, proxySession.ownerId);
+               return {
+                 server: proxySession.server,
+                 credentials: proxySession.credentials ? { ...proxySession.credentials } : null,
+               };
+             },
           }
         : {}),
     };

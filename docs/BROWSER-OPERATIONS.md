@@ -3,7 +3,7 @@
 The managed browser runtime supports macOS and Linux. It is separate from Prometheus goal execution.
 See the [browser reference](RESOURCE-SELECTION.md) for settings, profiles, login handoff, and tool procedures.
 
-Paid standalone Turnstile solving is opt-in, never triggered by navigation, and requires explicit user authorization for each call, an approved origin, trusted acceptance evidence, and an initialized private durable ledger. Reservation limits are estimates, not a provider-enforced maximum charge; any unresolved charge blocks further submissions until trustworthy reconciliation. Provider requests use a separate direct service channel, not the browser proxy. See [2captcha policy and accounting](BROWSER-2CAPTCHA.md) before enabling it. Access denial and managed challenges remain stop conditions; do not rotate or fall back to direct browsing.
+Paid CAPTCHA solving is opt-in, never triggered by navigation, and requires explicit user authorization for each call, an approved origin, trusted acceptance evidence, and an initialized private durable ledger. Automatic handling covers visible standalone Turnstile/reCAPTCHA v2 callbacks; other API v2 types require a configured trusted site adapter. Reservation limits are estimates, not a provider-enforced maximum charge; any unresolved charge blocks further submissions until trustworthy reconciliation. Provider API requests use a separate direct service channel; forwarding the browser's pinned proxy to the solving worker requires explicit `captcha.proxyMode: "browser"` disclosure policy. See [2captcha coverage, policy and accounting](BROWSER-2CAPTCHA.md) before enabling it. Access denial and managed challenges remain stop conditions; do not rotate or fall back to direct browsing.
 
 ## Installed Layout
 

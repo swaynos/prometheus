@@ -42,6 +42,9 @@ jobs:
       - name: Controller regressions
         if: matrix.channel == 'default' && matrix.mode == 'headless'
         run: npm --prefix packages/prometheus ci && npm run test:controller
+      - name: CAPTCHA catalog, site adapters, proxy disclosure and accounting (synthetic only)
+        if: matrix.channel == 'default' && matrix.mode == 'headless'
+        run: node --test --test-concurrency=2 --test-timeout=300000 tests/integration/browser_2captcha.test.mjs tests/integration/browser_captcha_catalog.test.mjs tests/integration/browser_captcha_adapters.test.mjs tests/integration/browser_captcha_mcp.test.mjs tests/integration/browser_challenge.test.mjs tests/integration/browser_budget.test.mjs
       - name: Managed virtual-display launcher and cleanup
         if: matrix.mode == 'virtual-display'
         run: node --test --test-timeout=300000 tests/integration/browser_virtual_display.test.mjs

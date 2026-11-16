@@ -1,3 +1,6 @@
+import { captureCaptchaCandidate } from './opencode-browser-captcha-page.mjs';
+import { CAPTCHA_TYPES, validateCaptchaTask, snapshotCaptchaValue } from './opencode-browser-captcha-types.mjs';
+
 // Internal lifecycle only. No MCP endpoint can inject these dependencies.
 // The owner must supply a monotonic binding revision that changes on every tab,
 // context or proxy-session change, including change-and-change-back.
@@ -14,10 +17,34 @@ async function bounded(fn, signal) {
   finally { signal.removeEventListener('abort', stop); }
 }
 
+// Read-only inspection has the same renderer/cancellation bound as solving.
+// Dispose a handle even when its creation finishes after the caller timed out.
+export async function inspectCaptchaCandidate({ page, challenge, timeoutMs = 15000, signal }) {
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const combined = signal ? AbortSignal.any([deadline, signal]) : deadline;
+  if (combined.aborted) throw new Error('inspection interrupted');
+  let handle, finished = false;
+  const evaluation = page.evaluateHandle(captureCaptchaCandidate, { challenge });
+  void evaluation.then(late => { if (finished || combined.aborted) void late.dispose().catch(() => {}); }, () => {});
+  try {
+    handle = await bounded(() => evaluation, combined);
+    return await bounded(() => handle.evaluate(value => value.status === 'candidate'
+      ? { status: value.status, type: value.type, solve_available: false }
+      : { status: value.status, ...(value.reason ? { reason: value.reason } : {}) }), combined);
+  } finally {
+    finished = true;
+    if (handle) void handle.dispose().catch(() => {});
+  }
+}
+
 // navigationStatus must be fresh evidence for this exact main-frame document.
 // acceptSelector is a trusted, caller-specified site success signal which must
 // not be visible before application. No page strings are returned to the caller.
-export async function inspectTurnstileLifecycle({ page, context, getBinding, navigationStatus, acceptSelector, timeoutMs = 15000, signal }) {
+export function inspectTurnstileLifecycle(options) {
+  return inspectCaptchaLifecycle({ ...options, turnstileOnly: true, legacyToken: true });
+}
+
+export async function inspectCaptchaLifecycle({ page, context, getBinding, navigationStatus, acceptSelector, challenge, turnstileOnly = false, legacyToken = false, timeoutMs = 15000, signal }) {
   if (!page || !context || page.context() !== context || typeof getBinding !== 'function' ||
       !Number.isInteger(navigationStatus) || navigationStatus < 200 || navigationStatus >= 400 ||
       typeof acceptSelector !== 'string' || !acceptSelector || acceptSelector.length > 512 ||
@@ -58,30 +85,28 @@ export async function inspectTurnstileLifecycle({ page, context, getBinding, nav
   };
   try {
     if (inspectionSignal.aborted) throw new Error('interrupted');
-    const evaluation = page.evaluateHandle(() => {
-      const isManaged = () => {
-        const title = document.title.trim(), body = document.body?.innerText || '';
-        const managed = /^(?:just a moment[.!\s…]*|checking your browser.*|attention required.*cloudflare.*|verify (?:that )?you are human[.!\s]*)$/i.test(title) && /checking your browser|verify (?:that )?you are human|performing security verification|enable javascript and cookies to continue/i.test(body);
-        return Boolean(managed || document.querySelector('iframe[src*="/cdn-cgi/challenge-platform/"],form[action*="/cdn-cgi/challenge-platform/"]'));
-      };
-      if (isManaged()) return null;
-      const widgets = [...document.querySelectorAll('.cf-turnstile')];
-      if (widgets.length !== 1) return null;
-      const widget = widgets[0], rect = widget.getBoundingClientRect();
-      const name = widget.getAttribute('data-callback'), key = widget.getAttribute('data-sitekey');
-      if (!rect.width || !rect.height || getComputedStyle(widget).visibility !== 'visible' || !key || key.length > 2048 || !/^[A-Za-z_$][\w$]*$/.test(name || '') || widget.hasAttribute('data-action') || widget.hasAttribute('data-cdata') || widget.hasAttribute('data-chl-page-data')) return null;
-      const descriptor = Object.getOwnPropertyDescriptor(window, name);
-      if (!descriptor || typeof descriptor.value !== 'function') return null;
-      return { widget, callback: descriptor.value, name, key, document, isManaged };
-    });
+    const evaluation = page.evaluateHandle(captureCaptchaCandidate, { challenge, turnstileOnly });
     // A timed-out evaluateHandle may resolve later; dispose that remote handle
     // without making the caller wait for a stalled renderer.
     void evaluation.then(late => { if (disposed || inspectionSignal.aborted) void late.dispose().catch(() => {}); }, () => {});
     handle = await bounded(() => evaluation, inspectionSignal);
-    const key = await bounded(() => handle.evaluate(value => value?.key || null), inspectionSignal);
-    if (!key || !valid() || await bounded(() => page.locator(acceptSelector).first().isVisible(), inspectionSignal) || inspectionSignal.aborted) throw new Error('unsupported challenge');
-    const websiteURL = url.href;
+    let task = snapshotCaptchaValue(await bounded(() => handle.evaluate(value => value?.status === 'candidate' ? value.task : null), inspectionSignal));
+    if (!task || !Object.hasOwn(CAPTCHA_TYPES, task.type) || !valid() || await bounded(() => page.locator(acceptSelector).first().isVisible(), inspectionSignal) || inspectionSignal.aborted) throw new Error('unsupported challenge');
+    // The page never chooses a proxy or a different target document. A required
+    // proxy is bound privately by the owner after inspection.
+    if (Object.keys(task).some(k => k.startsWith('proxy')) ||
+        (task.websiteURL !== undefined && task.websiteURL !== url.href) ||
+        (task.redirectUri !== undefined && task.redirectUri !== url.href)) throw new Error('unsupported challenge');
+    const spec = CAPTCHA_TYPES[task.type];
+    const validationType = spec.proxy === 'required' && Object.hasOwn(CAPTCHA_TYPES, `${task.type}Proxyless`) ? `${task.type}Proxyless` : task.type;
+    const checked = validateCaptchaTask(spec.proxy === 'required' && validationType === task.type
+      ? { ...task, proxyType: 'http', proxyAddress: 'validation.invalid', proxyPort: 80 }
+      : { ...task, type: validationType });
+    task = snapshotCaptchaValue({ ...Object.fromEntries(Object.entries(checked).filter(([k]) => !k.startsWith('proxy'))), type: task.type });
+    if ((task.websiteURL !== undefined && task.websiteURL !== url.href) ||
+        (task.redirectUri !== undefined && task.redirectUri !== url.href)) throw new Error('unsupported challenge');
     return Object.freeze({
+      type: task.type,
       async cancel() { stale = true; cancellation.abort(); await cleanup(); },
       async solve({ authorizePaid, maxCostUsd, maxTasks, authorize, reserve, createProvider, onReceipt, protectToken, signal } = {}) {
         if (used) return result('not_submitted', 'already_used', 'unknown');
@@ -93,7 +118,7 @@ export async function inspectTurnstileLifecycle({ page, context, getBinding, nav
         let outcome = 'not-submitted', applied = false, accepted = false, reserving = false;
         try {
           if (!valid() || combined.aborted) throw new Error('stale');
-          const provider = createProvider({ websiteURL, websiteKey: key });
+          const provider = createProvider(legacyToken ? { websiteURL: task.websiteURL, websiteKey: task.websiteKey } : task);
           outcome = 'unknown';
           await bounded(() => provider.solve({
             signal: combined,
@@ -105,8 +130,14 @@ export async function inspectTurnstileLifecycle({ page, context, getBinding, nav
               finally { reserving = false; }
             },
             onReceipt: typeof onReceipt === 'function' ? onReceipt : undefined,
-            onReady: async (token, s) => {
-              if (typeof protectToken === 'function') protectToken(token);
+            onReady: async (solution, s) => {
+              const protect = value => {
+                if (typeof value === 'string' && typeof protectToken === 'function') protectToken(value);
+                else if (value && typeof value === 'object') for (const child of Object.values(value)) protect(child);
+              };
+              protect(solution);
+              const payload = legacyToken ? solution : challenge ? solution : solution.token || solution.gRecaptchaResponse;
+              if (!challenge && (typeof payload !== 'string' || !payload)) throw new Error('invalid solution');
               outcome = 'submitted';
               if (!valid() || s.aborted) throw new Error('stale');
               if (await bounded(() => page.locator(acceptSelector).first().isVisible(), s)) throw new Error('preexisting evidence');
@@ -116,11 +147,9 @@ export async function inspectTurnstileLifecycle({ page, context, getBinding, nav
               const invoked = await bounded(() => handle.evaluate((value, args) => {
                 const evidence = document.querySelector(args.acceptSelector);
                 if (evidence && evidence.getClientRects().length && getComputedStyle(evidence).visibility === 'visible') return false;
-                if (Date.now() >= args.expiresAt || !value || document !== value.document || value.isManaged() || !value.widget.isConnected || value.widget.ownerDocument !== document || document.querySelectorAll('.cf-turnstile').length !== 1 || value.widget.getAttribute('data-sitekey') !== value.key || value.widget.getAttribute('data-callback') !== value.name || value.widget.hasAttribute('data-action') || value.widget.hasAttribute('data-cdata') || value.widget.hasAttribute('data-chl-page-data') || Object.getOwnPropertyDescriptor(window, value.name)?.value !== value.callback) return false;
-                const rect = value.widget.getBoundingClientRect();
-                if (!rect.width || !rect.height || getComputedStyle(value.widget).visibility !== 'visible') return false;
-                value.callback(args.token); return true;
-              }, { token, expiresAt, acceptSelector }), s);
+                if (Date.now() >= args.expiresAt || !value || !value.isCurrent()) return false;
+                value.callback(args.payload); return true;
+              }, { payload, expiresAt, acceptSelector }), s);
               if (!invoked) throw new Error('stale');
               applied = true;
               if (!valid() || s.aborted) throw new Error('stale');

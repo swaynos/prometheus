@@ -11,7 +11,7 @@ import { browserConfigFromEnv, validateBrowserConfig } from './opencode-browser-
 import { hasActiveSessionOwners } from './opencode-browser-sessions.mjs';
 
 const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const files = ['state', 'runtime', 'service', 'login', 'humanize', 'sessions', 'proxy-list', '2captcha', 'challenge', 'budget'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs', 'browser-profiles.mjs', 'browser-sessions.mjs', 'browser-budget.mjs');
+const files = ['state', 'runtime', 'service', 'login', 'humanize', 'sessions', 'proxy-list', '2captcha', 'captcha-types', 'captcha-page', 'challenge', 'budget'].map(x => `opencode-browser-${x}.mjs`).concat('opencode-playwright-mcp.mjs', 'browser-profiles.mjs', 'browser-sessions.mjs', 'browser-budget.mjs');
 const inventory = [...files, 'rules/resource-selection.md', 'docs/RESOURCE-SELECTION.md', 'docs/BROWSER-OPERATIONS.md', 'docs/BROWSER-2CAPTCHA.md', 'docs/BROWSER-SHOPPING-WORKFLOW.md', '.env.example', 'proxies.txt.example', 'package.json', 'package-lock.json'];
 const historical = new Set([...inventory, 'docs/BROWSER-MIGRATION.md']);
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');

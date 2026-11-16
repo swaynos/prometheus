@@ -12,8 +12,8 @@ import { browserConfigFromEnv, browserLaunchOptions, browserRuntimeInfo, bundled
 import { getSessionAuthRecords, sanitizePoolProxyError, verifyTaskSessionOwner } from "./opencode-browser-sessions.mjs";
 import { enterTaskDisplay } from "./opencode-browser-service.mjs";
 import { humanClick, humanType, applyNavigationDelay } from "./opencode-browser-humanize.mjs";
-import { inspectTurnstileLifecycle } from "./opencode-browser-challenge.mjs";
-import { createTurnstileTask } from "./opencode-browser-2captcha.mjs";
+import { inspectCaptchaCandidate, inspectCaptchaLifecycle } from "./opencode-browser-challenge.mjs";
+import { CAPTCHA_TYPES, createCaptchaTask } from "./opencode-browser-2captcha.mjs";
 import { reserveBudget, settleBudget } from "./opencode-browser-budget.mjs";
 
 const TASK_CONFIG = browserConfigFromEnv();
@@ -49,8 +49,8 @@ const TOOLS = [
   toolDef("browser_status", "Return non-secret browser runtime and page health metadata."),
   toolDef("browser_takeover", "Pause agent access to an existing explicitly headed managed task for user control; requires prior user consent.", { user_requested: { type: "boolean" } }, ["user_requested"]),
   toolDef("browser_handback", "Resume after the user explicitly confirms handback; inspect the page before further actions.", { user_confirmed: { type: "boolean" } }, ["user_confirmed"]),
-  toolDef("browser_challenge_inspect", "Inspect the active page for a standalone Turnstile candidate. Never solves or retries; access-denied pages remain unsupported."),
-  toolDef("browser_challenge_solve", "Explicitly authorize one paid standalone Turnstile solve under the configured origin and durable budget policy; never called by navigation.", { authorize_paid: { type: "boolean" }, max_cost_usd: { type: "number", exclusiveMinimum: 0 }, max_tasks: { type: "integer", minimum: 1 } }, ["authorize_paid", "max_cost_usd", "max_tasks"]),
+  toolDef("browser_challenge_inspect", "Inspect a standalone Turnstile/reCAPTCHA v2 widget or operator-configured CAPTCHA adapter. Never solves or retries; access-denied pages remain unsupported."),
+  toolDef("browser_challenge_solve", "Explicitly authorize one paid CAPTCHA solve under the configured origin, site adapter, proxy-disclosure and durable budget policy; never called by navigation.", { authorize_paid: { type: "boolean" }, max_cost_usd: { type: "number", exclusiveMinimum: 0 }, max_tasks: { type: "integer", minimum: 1 } }, ["authorize_paid", "max_cost_usd", "max_tasks"]),
   toolDef("browser_navigate_back", "Go back in history."),
   toolDef("browser_forward", "Go forward in history."),
   toolDef("browser_reload", "Reload the current page after allowing in-flight network requests to settle.", { wait_until: { type: "string", enum: WAIT_UNTIL_ENUM }, timeout: { type: "number", description: "Total reload budget in seconds, bounded by the transport budget." } }),
@@ -112,6 +112,7 @@ let context = null;
 let resolvedRuntime = null;
 let proxySession = null;
 let proxyRelay = null;
+let getCaptchaProxy = null;
 let pages = [];
 let activeIndex = 0;
 const consoleMessages = [];
@@ -132,6 +133,18 @@ let takeoverLost = false;
 let recoveryRequired = false;
 const privateOutputValues = new Set();
 function protectOutput(value) { if (typeof value === 'string' && value) privateOutputValues.add(value); }
+function protectCaptchaValue(value) {
+  if (typeof value === 'string') protectOutput(value);
+  else if (value && typeof value === 'object') for (const child of Object.values(value)) protectCaptchaValue(child);
+}
+function captchaProxyReason(type) {
+  const kind = CAPTCHA_TYPES[type]?.proxy, mode = TASK_CONFIG.captcha?.proxyMode;
+  if (!kind) return 'unsupported_task';
+  if (kind === 'required' && (!TASK_CONFIG.proxy || mode === 'proxyless')) return 'pinned_proxy_required';
+  if (TASK_CONFIG.proxy && kind !== 'none' && !mode) return 'proxy_disclosure_required';
+  if (TASK_CONFIG.proxy && mode === 'browser' && kind === 'proxyless-only') return 'proxy_not_supported';
+  return null;
+}
 
 function frameId(frame) {
   if (!frameIds.has(frame)) frameIds.set(frame, `f${frameIds.size + 1}-${randomUUID().slice(0, 8)}`);
@@ -200,6 +213,7 @@ async function ensureContext() {
     runtime: resolvedRuntime,
     proxySession = null,
     proxyRelay = null,
+    getCaptchaProxy = null,
   } = await createTaskContext(chromium, TASK_CONFIG, undefined, { configDir: CONFIG_DIR }));
   const ownerContext = context, ownerBrowser = browser;
   const lost = () => {
@@ -257,6 +271,7 @@ async function closeBrowser({ preserveTakeoverLoss = false } = {}) {
   context = null;
   resolvedRuntime = null;
   proxySession = null;
+  getCaptchaProxy = null;
   proxyRelay = null;
   pages = [];
   activeIndex = 0;
@@ -755,21 +770,10 @@ const HANDLERS = {
     const status = navigationStatuses.get(page);
     if (status === undefined || status >= 400 || !/^https?:\/\//i.test(page.url())) return text({ status: "unsupported", reason: "navigation_denied_or_unverified" });
     try {
-      const result = await page.evaluate(() => {
-        const title = document.title || "";
-        const body = document.body?.innerText || "";
-        const challengeTitle = /^(?:just a moment[.!\s…]*|checking your browser.*|attention required.*cloudflare.*|verify (?:that )?you are human[.!\s]*)$/i.test(title.trim());
-        if ((challengeTitle && /checking your browser|verify (?:that )?you are human|performing security verification|enable javascript and cookies to continue/i.test(body)) || document.querySelector('iframe[src*="/cdn-cgi/challenge-platform/"], form[action*="/cdn-cgi/challenge-platform/"]')) return { status: "unsupported", reason: "access_denial_or_managed_challenge" };
-        const widgets = [...document.querySelectorAll('.cf-turnstile')];
-        if (!widgets.length) return { status: "not_detected" };
-        if (widgets.length !== 1) return { status: "unsupported", reason: "ambiguous_widgets" };
-        const widget = widgets[0];
-        const rect = widget.getBoundingClientRect();
-        if (!rect.width || !rect.height || getComputedStyle(widget).visibility !== 'visible' || !widget.getAttribute('data-sitekey') || !widget.getAttribute('data-callback') || widget.hasAttribute('data-action') || widget.hasAttribute('data-cdata') || widget.hasAttribute('data-chl-page-data')) return { status: "unsupported", reason: "unverified_widget" };
-        return { status: "candidate", type: "standalone_turnstile", solve_available: false };
-      });
-      if (result.status === 'candidate' && TASK_CONFIG.captcha?.policy) {
-        try { result.solve_available = TASK_CONFIG.captcha.policy.sites.some(site => site.origin === new URL(page.url()).origin); } catch {}
+      const site = TASK_CONFIG.captcha?.policy?.sites.find(site => site.origin === new URL(page.url()).origin);
+      const result = await inspectCaptchaCandidate({ page, challenge: site?.challenge, timeoutMs: MAX_WAIT_MS, signal: activeRequest?.signal });
+      if (result.status === 'candidate') {
+        result.solve_available = Boolean(site && TASK_CONFIG.executionMode !== 'external-cdp' && !captchaProxyReason(result.type));
       }
       return text(result);
     } catch { return text({ status: "unsupported", reason: "inspection_interrupted" }); }
@@ -789,8 +793,8 @@ const HANDLERS = {
     const ownerContext = context, ownerPage = page, proxyGeneration = proxySession?.generation;
     const getBinding = () => {
       if (context !== ownerContext || pages[activeIndex] !== ownerPage) return 'invalid';
-      if (TASK_CONFIG.proxy) {
-        try { if (getSessionAuthRecords(CONFIG_DIR, TASK_CONFIG.proxy.session).generation !== proxyGeneration) return 'invalid'; }
+       if (TASK_CONFIG.proxy) {
+         try { verifyTaskSessionOwner(CONFIG_DIR, TASK_CONFIG, proxyGeneration, proxySession?.ownerId); }
         catch { return 'invalid'; }
       }
       return String(bindingRevision);
@@ -798,15 +802,30 @@ const HANDLERS = {
     if (getBinding() === 'invalid') return text({ status: 'not_submitted', reason: 'binding_unavailable' });
     let id;
     try {
-      const lifecycle = await inspectTurnstileLifecycle({ page, context: ownerContext, getBinding, navigationStatus: status, acceptSelector: site.acceptSelector, timeoutMs: Math.min(config.timeoutMs, MAX_WAIT_MS), signal: activeRequest?.signal });
+      const lifecycle = await inspectCaptchaLifecycle({ page, context: ownerContext, getBinding, navigationStatus: status, acceptSelector: site.acceptSelector, challenge: site.challenge, timeoutMs: Math.min(config.timeoutMs, MAX_WAIT_MS), signal: activeRequest?.signal });
+      const proxyReason = captchaProxyReason(lifecycle.type);
+      if (proxyReason) {
+        await lifecycle.cancel();
+        return text({ status: 'not_submitted', reason: proxyReason, outcome: 'not-submitted' });
+      }
       const result = await lifecycle.solve({
         authorizePaid: true, maxCostUsd: args.max_cost_usd, maxTasks: args.max_tasks,
         signal: activeRequest?.signal,
         authorize: async () => true,
         createProvider: task => {
-          protectOutput(task.websiteKey);
-          id = createHash('sha256').update(JSON.stringify([task.websiteURL, task.websiteKey])).digest('hex');
-          return createTurnstileTask(config, task);
+          protectCaptchaValue(task);
+          const spec = CAPTCHA_TYPES[task.type];
+          let proxy;
+          if (TASK_CONFIG.proxy && spec.proxy !== 'none') {
+            if (!config.proxyMode) throw new Error('proxy disclosure policy required');
+            if (config.proxyMode === 'browser') {
+              if (!getCaptchaProxy) throw new Error('pinned proxy unavailable');
+              proxy = getCaptchaProxy();
+              protectCaptchaValue(proxy);
+            }
+          }
+          id = createHash('sha256').update(JSON.stringify([page.url(), task, proxySession?.generation])).digest('hex');
+          return createCaptchaTask(config, task, { proxy });
         },
         reserve: ({ signal }) => reserveBudget(policy.ledgerDir, { id, estimate: policy.estimateMicros, dailyTasks: policy.dailyTasks, lifetimeTasks: policy.lifetimeTasks, dailyMicros: policy.dailyMicros, lifetimeMicros: policy.lifetimeMicros, signal }),
         onReceipt: async cost => { if (cost !== null && !await settleBudget(policy.ledgerDir, id, cost)) throw new Error('accounting unavailable'); },

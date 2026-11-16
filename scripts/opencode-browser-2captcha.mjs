@@ -3,6 +3,9 @@ import path from 'node:path';
 import https from 'node:https';
 import { parseEnv } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
+import { CAPTCHA_TYPES, bindCaptchaProxy, validateCaptchaSolution } from './opencode-browser-captcha-types.mjs';
+
+export { CAPTCHA_TYPES, CAPTCHA_TYPE_ALIASES, validateCaptchaTask } from './opencode-browser-captcha-types.mjs';
 
 export class CaptchaProviderError extends Error {
   constructor(code, outcome) {
@@ -18,10 +21,11 @@ const only = (value, keys) => object(value) && Object.keys(value).every(key => k
 
 export function validateCaptchaConfig(config) {
   if (config === undefined) return undefined;
-  if (!only(config, ['enabled', 'provider', 'keyFile', 'envFile', 'timeoutMs', 'pollIntervalMs', 'policy'])) throw fail('invalid-config');
+  if (!only(config, ['enabled', 'provider', 'keyFile', 'envFile', 'timeoutMs', 'pollIntervalMs', 'proxyMode', 'policy'])) throw fail('invalid-config');
   const snapshot = { ...config };
   if (!['enabled', 'provider', 'timeoutMs', 'pollIntervalMs'].every(key => Object.hasOwn(snapshot, key)) ||
-      snapshot.enabled !== true || snapshot.provider !== '2captcha' ||
+       snapshot.enabled !== true || snapshot.provider !== '2captcha' ||
+      (Object.hasOwn(snapshot, 'proxyMode') && !['browser', 'proxyless'].includes(snapshot.proxyMode)) ||
       (Object.hasOwn(snapshot, 'keyFile') && (typeof snapshot.keyFile !== 'string' || !path.isAbsolute(snapshot.keyFile))) ||
       (Object.hasOwn(snapshot, 'envFile') && (typeof snapshot.envFile !== 'string' || !path.isAbsolute(snapshot.envFile))) ||
       (Object.hasOwn(snapshot, 'keyFile') && Object.hasOwn(snapshot, 'envFile')) ||
@@ -37,9 +41,18 @@ export function validateCaptchaConfig(config) {
         !['estimateMicros', 'dailyTasks', 'lifetimeTasks', 'dailyMicros', 'lifetimeMicros'].every(k => Number.isSafeInteger(p[k]) && p[k] > 0) ||
         p.estimateMicros > p.dailyMicros || p.estimateMicros > p.lifetimeMicros) throw fail('invalid-config');
     const sites = p.sites.map(site => {
-      if (!only(site, ['origin', 'acceptSelector']) || !Object.hasOwn(site, 'origin') || !Object.hasOwn(site, 'acceptSelector') || typeof site.origin !== 'string' || typeof site.acceptSelector !== 'string' || !site.acceptSelector || site.acceptSelector.length > 512) throw fail('invalid-config');
+      if (!only(site, ['origin', 'acceptSelector', 'challenge']) || !Object.hasOwn(site, 'origin') || !Object.hasOwn(site, 'acceptSelector') || typeof site.origin !== 'string' || typeof site.acceptSelector !== 'string' || !site.acceptSelector || site.acceptSelector.length > 512) throw fail('invalid-config');
       try { const u = new URL(site.origin); if (u.protocol !== 'https:' || u.origin !== site.origin || u.username || u.password) throw new Error(); } catch { throw fail('invalid-config'); }
-      return Object.freeze({ ...site });
+      let challenge;
+      if (site.challenge !== undefined) {
+        const c = site.challenge;
+        if (!only(c, ['type', 'widgetSelector', 'taskCallback', 'solutionCallback']) ||
+            !['type', 'widgetSelector', 'taskCallback', 'solutionCallback'].every(k => Object.hasOwn(c, k)) ||
+            !Object.hasOwn(CAPTCHA_TYPES, c.type) || typeof c.widgetSelector !== 'string' || !c.widgetSelector || c.widgetSelector.length > 512 ||
+            ![c.taskCallback, c.solutionCallback].every(v => typeof v === 'string' && /^[A-Za-z_$][\w$]*$/.test(v))) throw fail('invalid-config');
+        challenge = Object.freeze({ ...c });
+      }
+      return Object.freeze({ ...site, ...(challenge ? { challenge } : {}) });
     });
     if (new Set(sites.map(s => s.origin)).size !== sites.length) throw fail('invalid-config');
     snapshot.policy = Object.freeze({ ...p, sites: Object.freeze(sites) });
@@ -139,9 +152,9 @@ function request(endpoint, body, signal) {
     const req = https.request(`https://api.2captcha.com/${endpoint}`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, signal,
     }, res => {
-      let data = '';
+      let data = '', size = 0;
       res.setEncoding('utf8');
-      res.on('data', chunk => { data += chunk; if (data.length > 65536) req.destroy(); });
+      res.on('data', chunk => { size += Buffer.byteLength(chunk); if (size > 16 * 1024 * 1024) req.destroy(); else data += chunk; });
       res.on('error', reject);
       res.on('end', () => {
         if (res.statusCode !== 200) return reject(new Error());
@@ -166,15 +179,28 @@ async function boundedCall(fn, signal) {
 
 // One object represents exactly one immutable task and can never submit twice.
 export function createTurnstileTask(configInput, taskInput) {
+  if (!only(taskInput, ['websiteURL', 'websiteKey']) || typeof taskInput.websiteURL !== 'string' ||
+       typeof taskInput.websiteKey !== 'string' || !taskInput.websiteKey || taskInput.websiteKey.length > 2048) throw fail('invalid-task');
+  const job = createCaptchaTask(configInput, { type: 'TurnstileTaskProxyless', ...taskInput });
+  return Object.freeze({
+    solve(hooks = {}) {
+      return job.solve({ ...hooks, onReady: typeof hooks.onReady === 'function' ? (solution, signal) => hooks.onReady(solution.token, signal) : undefined });
+    },
+  });
+}
+
+// Generic API v2 entry point. Structured solutions stay inside trusted hooks;
+// the public result contains status only. Construction never contacts 2captcha.
+export function createCaptchaTask(configInput, taskInput, options = {}) {
   const config = validateCaptchaConfig(configInput);
   if (!config) throw fail('disabled');
-  if (!only(taskInput, ['websiteURL', 'websiteKey']) || typeof taskInput.websiteURL !== 'string' ||
-      typeof taskInput.websiteKey !== 'string' || !taskInput.websiteKey || taskInput.websiteKey.length > 2048) throw fail('invalid-task');
+  let task;
   try {
-    const url = new URL(taskInput.websiteURL);
-    if (url.protocol !== 'https:' || url.username || url.password || url.hash || taskInput.websiteURL.length > 4096) throw new Error();
-  } catch { throw fail('invalid-task'); }
-  const task = Object.freeze({ type: 'TurnstileTaskProxyless', websiteURL: taskInput.websiteURL, websiteKey: taskInput.websiteKey });
+    if (!only(options, ['proxy', 'languagePool']) || (options.languagePool !== undefined && !['en', 'rn'].includes(options.languagePool))) throw new Error();
+    task = bindCaptchaProxy(taskInput, options.proxy);
+  } catch { throw fail('invalid-task-or-proxy'); }
+  const languagePool = options.languagePool;
+  if (languagePool && CAPTCHA_TYPES[task.type].proxy !== 'none') throw fail('invalid-task-or-proxy');
   let used = false;
   return Object.freeze({
     async solve({ authorize, reserve, onReady, onReceipt, signal } = {}) {
@@ -197,7 +223,7 @@ export function createTurnstileTask(configInput, taskInput) {
       if (combined.aborted) throw interrupted('not-submitted');
       if (allowed !== true) throw fail('reservation-required');
       let result;
-      try { result = await request('createTask', { clientKey: key, task }, combined); }
+      try { result = await request('createTask', { clientKey: key, task, ...(languagePool ? { languagePool } : {}) }, combined); }
       catch { throw combined.aborted ? interrupted('unknown') : fail('submit-unknown', 'unknown'); }
       if (!object(result) || !Number.isSafeInteger(result.errorId)) throw fail('submit-unknown', 'unknown');
       if (result.errorId !== 0) throw fail('provider-error', 'rejected');
@@ -211,7 +237,10 @@ export function createTurnstileTask(configInput, taskInput) {
         if (!object(result) || !Number.isSafeInteger(result.errorId)) throw fail('malformed-response', 'submitted');
         if (result.errorId !== 0) throw fail('provider-error', 'submitted');
         if (result.status === 'processing') continue;
-        if (result.status !== 'ready' || !object(result.solution) || typeof result.solution.token !== 'string' || !result.solution.token) throw fail('malformed-response', 'submitted');
+        if (result.status !== 'ready') throw fail('malformed-response', 'submitted');
+        let solution;
+        try { solution = validateCaptchaSolution(task, result.solution); }
+        catch { throw fail('malformed-response', 'submitted'); }
         // Parse USD as integer micro-dollars, rounding upward; missing or
         // malformed receipts leave the original reservation untouched.
         let cost = null;
@@ -226,7 +255,7 @@ export function createTurnstileTask(configInput, taskInput) {
           try { await boundedCall(() => onReceipt(cost, combined), combined); }
           catch { throw combined.aborted ? interrupted('submitted') : fail('receipt-failed', 'submitted'); }
         }
-        try { await boundedCall(() => onReady(result.solution.token, combined), combined); }
+        try { await boundedCall(() => onReady(solution, combined), combined); }
         catch { throw combined.aborted ? interrupted('submitted') : fail('consumer-failed', 'submitted'); }
         return Object.freeze({ status: 'ready', outcome: 'submitted' });
       }

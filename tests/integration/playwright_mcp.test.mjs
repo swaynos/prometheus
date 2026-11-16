@@ -10,12 +10,12 @@ function fixtureServer() {
   const httpServer = http.createServer((req, res) => {
     if (req.url === "/turnstile-widget") {
       res.writeHead(200, { "content-type": "text/html" });
-      res.end('<!doctype html><title>Form</title><div class="cf-turnstile" style="width:300px;height:65px" data-sitekey="PRIVATE_SITE_KEY" data-callback="privateCallback"></div>');
+      res.end('<!doctype html><title>Form</title><div class="cf-turnstile" style="width:300px;height:65px" data-sitekey="PRIVATE_SITE_KEY" data-callback="privateCallback"></div><script>window.privateCallback=()=>{};</script>');
       return;
     }
     if (req.url === "/turnstile-docs") {
       res.writeHead(200, { "content-type": "text/html" });
-      res.end('<!doctype html><title>Integration guide</title><h1>Documentation: verify you are human</h1><p>Do not retry an access denied result.</p><div class="cf-turnstile" style="width:300px;height:65px" data-sitekey="PRIVATE_SITE_KEY" data-callback="privateCallback"></div>');
+      res.end('<!doctype html><title>Integration guide</title><h1>Documentation: verify you are human</h1><p>Do not retry an access denied result.</p><div class="cf-turnstile" style="width:300px;height:65px" data-sitekey="PRIVATE_SITE_KEY" data-callback="privateCallback"></div><script>window.privateCallback=()=>{};</script>');
       return;
     }
     if (["/challenge", "/challenge-ok"].includes(req.url)) {
@@ -76,7 +76,7 @@ test("challenge inspection is redacted and solving is fail-closed", async () => 
   try {
     await c.call("browser_navigate", { url: `${base}/turnstile-widget` });
     const inspected = c.textOf(await c.call("browser_challenge_inspect"));
-    assert.deepEqual(JSON.parse(inspected), { status: "candidate", type: "standalone_turnstile", solve_available: false });
+    assert.deepEqual(JSON.parse(inspected), { status: "candidate", type: "TurnstileTaskProxyless", solve_available: false });
     assert.doesNotMatch(inspected, /PRIVATE_SITE_KEY|privateCallback/);
     assert.equal(JSON.parse(c.textOf(await c.call("browser_challenge_solve", {}))).reason, "explicit_authorization_and_limits_required");
     assert.deepEqual(JSON.parse(c.textOf(await c.call("browser_challenge_solve", { authorize_paid: true, max_cost_usd: 1, max_tasks: 1 }))), { status: "not_submitted", reason: "disabled" });
