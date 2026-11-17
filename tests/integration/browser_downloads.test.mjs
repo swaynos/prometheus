@@ -102,9 +102,10 @@ test("Playwright download events create validated collision-safe local files", a
     assert.match(c.textOf(emptyResult), /empty/);
     await assert.rejects(readFile(empty), { code: "ENOENT" });
   } finally {
-    c.close();
-    close();
-    await rm(destinationDir, { recursive: true, force: true });
+    try { await c.close(); } finally {
+      close();
+      await rm(destinationDir, { recursive: true, force: true });
+    }
   }
 });
 
@@ -124,9 +125,10 @@ test("authenticated retrieval uses the active headless context and validates byt
     assert.deepEqual(await readFile(destination), payload);
     assert.equal(retrievals(), 1);
   } finally {
-    c.close();
-    close();
-    await rm(destinationDir, { recursive: true, force: true });
+    try { await c.close(); } finally {
+      close();
+      await rm(destinationDir, { recursive: true, force: true });
+    }
   }
 });
 
@@ -166,9 +168,10 @@ test("visible media is saved without exposing its authenticated source URL", asy
     assert.match(c.textOf(oversized), /pixel limit/);
     await assert.rejects(readFile(oversizedDestination), { code: "ENOENT" });
   } finally {
-    c.close();
-    close();
-    await rm(destinationDir, { recursive: true, force: true });
+    try { await c.close(); } finally {
+      close();
+      await rm(destinationDir, { recursive: true, force: true });
+    }
   }
 });
 
@@ -193,6 +196,6 @@ test("a reconnect after an unknown non-idempotent submission never replays it", 
       await reconnected.call("browser_navigate", { url: `${base}/` });
       await new Promise((resolve) => setTimeout(resolve, 100));
       assert.equal(submissions(), 1);
-    } finally { reconnected.close(); }
-  } finally { close(); }
+    } finally { await reconnected.close(); }
+  } finally { try { await interrupted.close(); } finally { close(); } }
 });

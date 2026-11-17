@@ -7,7 +7,7 @@ export const repoRoot = path.resolve(import.meta.dirname, "../..");
 export const defaultMcpServer = process.env.PROMETHEUS_TEST_BROWSER_SERVER || path.join(repoRoot, "scripts", "opencode-playwright-mcp.mjs");
 export const hasXvfb = spawnSync("sh", ["-c", "command -v Xvfb && command -v xvfb-run && command -v xauth"], { stdio: "ignore" }).status === 0;
 
-export function spawnMcpClient(env = {}, { server = defaultMcpServer, timeoutMs = 60000, captureStderr = false, cwd } = {}) {
+export function spawnMcpClient(env = {}, { server = defaultMcpServer, timeoutMs = 60000, closeTimeoutMs = 10000, captureStderr = false, cwd } = {}) {
   const child = spawn(process.execPath, [server], {
     stdio: ["pipe", "pipe", captureStderr ? "pipe" : "inherit"],
     cwd,
@@ -40,6 +40,34 @@ export function spawnMcpClient(env = {}, { server = defaultMcpServer, timeoutMs 
       child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     });
   }
+  async function waitForExit(timeout) {
+    let timer;
+    try {
+      return await Promise.race([
+        exited.then(result => ({ result })),
+        new Promise(resolve => { timer = setTimeout(() => resolve(null), timeout); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  let closing;
+  function close() {
+    if (closing) return closing;
+    closing = (async () => {
+      child.stdin.end();
+      let outcome = await waitForExit(closeTimeoutMs);
+      if (outcome) return outcome.result;
+      child.kill("SIGTERM");
+      outcome = await waitForExit(2000);
+      if (!outcome) {
+        child.kill("SIGKILL");
+        outcome = await waitForExit(2000);
+      }
+      throw new Error(`MCP service did not exit within ${closeTimeoutMs}ms${outcome ? " and was terminated" : " and did not exit after SIGKILL"}`);
+    })();
+    return closing;
+  }
   const textOf = (result) => result?.content?.map((c) => c.text).join("") ?? "";
   return {
     child,
@@ -48,7 +76,7 @@ export function spawnMcpClient(env = {}, { server = defaultMcpServer, timeoutMs 
     rpc,
     call: async (name, args = {}) => (await rpc("tools/call", { name, arguments: args })).result,
     textOf,
-    close: () => { child.stdin.end(); return exited; },
+    close,
     disconnect: () => child.kill("SIGKILL"),
   };
 }

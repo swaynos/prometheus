@@ -28,9 +28,21 @@ jobs:
           node-version: 22.22.2
           cache: npm
       - run: npm ci
+      - name: Verify documentation
+        if: matrix.channel == 'default' && matrix.mode == 'headless'
+        run: npm run docs:check
       - run: npx playwright install --with-deps chromium
       - if: matrix.channel == 'chrome'
         run: npx playwright install chrome
+      - name: Browser lifecycle and documentation regressions
+        if: matrix.channel == 'default' && matrix.mode == 'headless'
+        run: >-
+          node --test --test-concurrency=2 --test-timeout=300000
+          tests/integration/mcp_client_cleanup.test.mjs
+          tests/integration/playwright_mcp.test.mjs
+          tests/integration/browser_downloads.test.mjs
+          tests/integration/browser_runtime.test.mjs
+          tests/integration/documentation.test.mjs
       - name: Install virtual display dependencies
         run: sudo apt-get update && sudo apt-get install -y xvfb xauth
       - name: Headless proxy fixtures and session diagnostics
@@ -42,7 +54,7 @@ jobs:
       - name: Controller regressions
         if: matrix.channel == 'default' && matrix.mode == 'headless'
         run: npm --prefix packages/prometheus ci && npm run test:controller
-      - name: CAPTCHA catalog, site adapters, proxy disclosure and accounting (synthetic only)
+      - name: Verify CAPTCHA coverage, disclosure, and accounting with synthetic fixtures
         if: matrix.channel == 'default' && matrix.mode == 'headless'
         run: node --test --test-concurrency=2 --test-timeout=300000 tests/integration/browser_2captcha.test.mjs tests/integration/browser_captcha_catalog.test.mjs tests/integration/browser_captcha_adapters.test.mjs tests/integration/browser_captcha_mcp.test.mjs tests/integration/browser_challenge.test.mjs tests/integration/browser_budget.test.mjs
       - name: Managed virtual-display launcher and cleanup

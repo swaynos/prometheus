@@ -1,192 +1,391 @@
-# Browser Operations Guide
+# Browser operations guide
 
-The managed browser runtime supports macOS and Linux. It is separate from Prometheus goal execution.
-See the [browser reference](RESOURCE-SELECTION.md) for settings, profiles, login handoff, and tool procedures.
+## Purpose and restrictions
 
-Paid CAPTCHA solving is opt-in, never triggered by navigation, and requires explicit user authorization for each call, an approved origin, trusted acceptance evidence, and an initialized private durable ledger. Automatic handling covers visible standalone Turnstile/reCAPTCHA v2 callbacks; other API v2 types require a configured trusted site adapter. Reservation limits are estimates, not a provider-enforced maximum charge; any unresolved charge blocks further submissions until trustworthy reconciliation. Provider API requests use a separate direct service channel; forwarding the browser's pinned proxy to the solving worker requires explicit `captcha.proxyMode: "browser"` disclosure policy. See [2captcha coverage, policy and accounting](BROWSER-2CAPTCHA.md) before enabling it. Access denial and managed challenges remain stop conditions; do not rotate or fall back to direct browsing.
+Use this guide to install, configure, and maintain the managed browser runtime on macOS or Linux.
+The runtime operates separately from Prometheus goal execution.
+See the [browser reference](RESOURCE-SELECTION.md) for settings, profiles, login, and tool procedures.
 
-## Installed Layout
+Paid CAPTCHA solving is optional and never starts from navigation.
+Each paid call requires explicit user authorization, an approved origin, trusted acceptance evidence, and an initialized private durable ledger.
+Automatic handling covers visible standalone Turnstile and reCAPTCHA v2 callbacks.
+Other API v2 types require a configured trusted site adapter.
 
-| Surface | Location or Name |
+Reservation limits are estimates, not provider-enforced charge ceilings.
+An unresolved charge blocks further submissions until trustworthy reconciliation.
+Provider API requests use a separate direct service connection.
+Disclosure of the pinned browser proxy to the worker requires explicit `captcha.proxyMode: "browser"` policy.
+Before enabling solves, read [coverage, policy, and accounting](BROWSER-2CAPTCHA.md).
+
+Stop on access denial and managed challenges.
+Do not rotate or use direct routing to bypass denial.
+
+## Installed layout
+
+| Component | Location or name |
 | --- | --- |
-| MCP server & tools | `prometheus-browser` (`prometheus-browser_browser_*`) |
-| Runtime & dependencies | `<config_dir>/prometheus-browser/` |
+| MCP server and tools | `prometheus-browser` (`prometheus-browser_browser_*`) |
+| Runtime and dependencies | `<config_dir>/prometheus-browser/` |
 | Instruction rule | `<config_dir>/prometheus-browser/rules/resource-selection.md` |
-| Reference docs | `<config_dir>/prometheus-browser/docs/` |
+| Reference documents | `<config_dir>/prometheus-browser/docs/` |
 | Shared settings | `<config_dir>/prometheus-browser.json` |
-| Saved sessions (0600) | `<config_dir>/prometheus-sessions/` |
-| Login sockets (0700) | `<config_dir>/prometheus-logins/` |
-| Proxy session registry & owners (0700/0600) | `<config_dir>/prometheus-proxy-sessions/` |
-| Default proxy list (0600) | `<config_dir>/proxies.txt` (normally `~/.config/opencode/proxies.txt`) |
-| Placeholder proxy-list example | `<config_dir>/prometheus-browser/proxies.txt.example` |
-| Legacy per-proxy JSON credential files (0700/0600) | `<config_dir>/prometheus-proxy-secrets/` (optional compatibility only) |
+| Saved authentication files, mode `0600` | `<config_dir>/prometheus-sessions/` |
+| Login socket directory, mode `0700` | `<config_dir>/prometheus-logins/` |
+| Proxy registry and owners, modes `0700`/`0600` | `<config_dir>/prometheus-proxy-sessions/` |
+| Default proxy list, mode `0600` | `<config_dir>/proxies.txt`, normally `~/.config/opencode/proxies.txt` |
+| Placeholder list example | `<config_dir>/prometheus-browser/proxies.txt.example` |
+| Optional legacy credential storage, modes `0700`/`0600` | `<config_dir>/prometheus-proxy-secrets/` |
 | Proxy session CLI | `npm run browser:sessions` |
-| Optional CAPTCHA ledger CLI | `node <config_dir>/prometheus-browser/browser-budget.mjs` (see [accounting](BROWSER-2CAPTCHA.md)) |
-| Migration receipt & backups | `<config_dir>/prometheus-browser-migration.json`, `<config_dir>/prometheus-browser-backups/` |
+| Optional CAPTCHA ledger CLI | `node <config_dir>/prometheus-browser/browser-budget.mjs` |
+| Migration receipt | `<config_dir>/prometheus-browser-migration.json` |
+| Runtime backups | `<config_dir>/prometheus-browser-backups/` |
 
-## Installation and Migration
+## Installation and migration
 
-1. Use Node `>=22.22.2 <25`. Run `npm ci` from the repository root.
-2. From the repository root, run `npx playwright install chromium` for bundled Chromium. This installs full Chromium for login and the headless shell for headless tasks. For `channel: "chrome"`, install Google Chrome. Install `xvfb` and `xauth` on Linux for `virtual-display`.
+### Prerequisites
+
+- Node `>=22.22.2 <25`.
+- Full Chromium for login and the headless shell for headless tasks.
+- Installed Google Chrome for `channel: "chrome"`.
+- Linux `xvfb` and `xauth` for `virtual-display`.
+
+### Procedure
+
+1. From the repository root, run `npm ci`.
+2. For bundled Chromium, run `npx playwright install chromium` from the same directory.
+   This installs full Chromium and the headless shell.
 3. Stop active browser tasks, login helpers, and affected OpenCode services.
-4. Run the installer (`--quiescent` asserts that active work is stopped; add `--migrate` to cut over from `cuddly-winner-browser`):
+4. Run the installer:
+
+   ```sh
+   node scripts/browser-profile.mjs install --config-dir "$HOME/.config/opencode" --quiescent
+   node scripts/browser-profile.mjs status --config-dir "$HOME/.config/opencode"
+   ```
+
+   `--quiescent` declares that active work has stopped.
+   To migrate from `cuddly-winner-browser`, also supply `--migrate`.
+5. Reload OpenCode if necessary.
+   Reconnect the browser MCP so it uses the installed runtime.
+
+The installer stages dependencies and verifies a blank-page launch.
+The probe loads no accounts, proxy credentials, or proxy sessions.
+The installer verifies that no active login helpers or proxy owners remain.
+It registers `/browser` and preserves JSONC comments and unrelated configuration.
+
+Installation includes the optional CAPTCHA scripts and documents, but does not initialize a paid-solve ledger.
+Solving remains disabled without CAPTCHA configuration.
+Provision credentials separately before following the ledger setup procedure.
+See [CAPTCHA accounting](BROWSER-2CAPTCHA.md) and [manual shopping](BROWSER-SHOPPING-WORKFLOW.md).
+
+### Missing bundled browsers
+
+Playwright stores bundled browsers in a cache outside the runtime.
+Cache cleanup can remove them after a successful installation.
+
+For `default` and `chromium`, `browser_status` reports `browserInstall`.
+It lists required browsers, pinned revisions, cache directories, and installation status.
+This marker-based check neither launches a browser nor verifies executable integrity or system dependencies.
+
+If a required browser is missing, task launch and login `start` stop before launch.
+Login `start` also stops before creating a worker.
+The error identifies the missing browser and revision, then supplies an `installCommand` for the runtime's own Playwright installation.
+Run that command rather than `npx playwright install` from an unrelated directory, which can install a different revision.
+
+This check does not inspect installed Chrome, Edge, non-Chromium profiles, or existing CDP browsers.
+It does not automatically download or repair files.
+Proxy session `doctor` does not verify browser installation.
+
+## Proxy setup and session lifecycle
+
+### Supported routes
+
+Optional proxy support covers managed Chromium-engine browsers with HTTP proxies.
+HTTPS destinations use CONNECT.
+External CDP, SOCKS5, and HTTPS-to-proxy transport are unsupported.
+
+### Create the private list
+
+1. Privately edit `~/.config/opencode/proxies.txt`.
+   For a custom configuration directory, use `<config_dir>/proxies.txt`.
+2. Put one authenticated HTTP proxy on each line.
+   Do not include a URL scheme:
+
+   ```text
+   HOST:PORT:USER:PASS
+   HOST:PORT:USER:PASS
+   ```
+
+3. Use your actual values locally.
+   Never paste credentials into chat, shell arguments, logs, or a repository.
+   The checkout and installed runtime include placeholder `proxies.txt.example`.
+   Do not overwrite an existing list with the example.
+4. Protect the actual file:
+
+   ```sh
+   chmod 600 "$HOME/.config/opencode/proxies.txt"
+   ```
+
+The list must meet all these conditions:
+
+- Regular file, not a symlink.
+- One hardlink.
+- Owned by the current user.
+- File mode exactly `0600`.
+- Outside all Git repositories.
+
+The configuration root can have mode `0755`.
+It must belong to the current user and prohibit writes by group and others.
+Ancestors must be real directories with trusted owners and protection from untrusted writes.
+Fixtures may use root-owned sticky temporary ancestors.
+The runtime rejects unsafe files. It never repairs permissions automatically.
+You do not need a separate secrets directory or individual JSON credential files.
+
+### Configure the route
+
+1. Merge this `proxy` block into `<config_dir>/prometheus-browser.json`.
+   Preserve unrelated settings:
+
+   ```json
+   {
+     "channel": "chrome",
+     "executionMode": "headless",
+     "proxy": {
+       "session": "main",
+       "strategy": "round-robin"
+     }
+   }
+   ```
+
+2. From the repository root, create the named session and inspect local configuration:
+
+   ```sh
+   export PROMETHEUS_CONFIG_DIR="$HOME/.config/opencode"
+   npm run browser:sessions -- create main
+   npm run browser:sessions -- doctor
+   npm run browser:sessions -- show main
+   ```
+
+3. Reload or reconnect the browser MCP after settings changes.
+   If the installed runtime lacks this capability, stop affected tasks and helpers.
+   Then update through the staged installer.
+   Checkout edits alone do not update an installation.
+
+Without `pool`, the configuration selects `proxies.txt`; there is no `poolFile` setting.
+Without `proxy`, the runtime retains direct routing and ignores the list.
+An explicit empty or invalid `pool` stops validation.
+
+For the installed runtime, replace `npm run browser:sessions --` with:
 
 ```sh
-node scripts/browser-profile.mjs install --config-dir "$HOME/.config/opencode" --quiescent
-node scripts/browser-profile.mjs status --config-dir "$HOME/.config/opencode"
+node "$PROMETHEUS_CONFIG_DIR/prometheus-browser/browser-sessions.mjs"
 ```
 
-The installer stages dependencies, verifies a blank-page launch without loading accounts or proxy credentials/sessions, checks that no active login helpers or proxy session owners remain, registers `/browser`, and preserves JSONC comments and unrelated config. Restart OpenCode after installation.
+Every command also accepts `--config-dir <dir>`.
+Session creation reserves an assignment even if a later launch fails.
+Reuse the session for later tasks rather than creating it again.
+Reopening `main` retains its proxy and generation.
 
-CAPTCHA solving is optional and disabled when its configuration is omitted; installing the runtime does not initialize a paid-solve ledger. See [2captcha accounting](BROWSER-2CAPTCHA.md) and the [manual shopping workflow](BROWSER-SHOPPING-WORKFLOW.md). The installed runtime includes their scripts and documentation; provision optional CAPTCHA credentials separately. Local installer fixtures use disposable roots and do not qualify a real headed desktop or Linux/Xvfb.
+### Login with the session
 
-### Missing Bundled Browsers
+1. Obtain approval for the named site.
+2. Start the login helper with the configured session:
 
-Playwright stores bundled browsers in a cache outside the runtime. Cache cleanup can remove these files after a successful installation.
+   ```sh
+   node "$PROMETHEUS_CONFIG_DIR/prometheus-browser/opencode-browser-login.mjs" start --config-dir "$PROMETHEUS_CONFIG_DIR" --session main --name store-login --url https://example.com/ --origin https://example.com
+   ```
 
-For the `default` and `chromium` channels, `browser_status` reports `browserInstall`: the required browsers, pinned revisions, cache directories, and installation status. This check reads install markers. It does not launch a browser or verify executable integrity or system dependencies.
+3. Pause automation during human control.
+   Follow the [login handoff procedure](RESOURCE-SELECTION.md).
+   The helper creates a private signed handoff.
+   Do not print or manually share it.
+4. Only after the user's reply, capture state and close the window:
 
-If a required bundled browser is missing, task launch and login `start` stop before browser launch. Login `start` checks before it creates a worker. The error identifies the missing browser and revision and supplies an `installCommand` that uses the runtime's own Playwright installation. Run that command. Do not run `npx playwright install` from an unrelated directory; it can install a different revision.
+   ```sh
+   node "$PROMETHEUS_CONFIG_DIR/prometheus-browser/opencode-browser-login.mjs" complete --config-dir "$PROMETHEUS_CONFIG_DIR" --name store-login
+   ```
 
-The check does not inspect installed Chrome, installed Edge, non-Chromium profiles, or browsers reached through an existing CDP endpoint. It does not download or repair files automatically. The proxy session `doctor` command below does not check browser installation.
+5. Verify task access in a fresh task context.
+   Saved state alone does not prove access.
 
-## Proxy Setup and Session Lifecycle
-
-Proxy support is optional and initially covers managed Chromium-engine browsers with HTTP proxies, including HTTPS destinations through CONNECT. It does not support external CDP, SOCKS5, or HTTPS-to-proxy transport.
-
-1. Privately edit `~/.config/opencode/proxies.txt` (or `<config_dir>/proxies.txt` for a custom configuration directory). Put one authenticated HTTP proxy per line, with **no URL scheme**:
-
-```text
-HOST:PORT:USER:PASS
-HOST:PORT:USER:PASS
-```
-
-Use your own values locally; never paste real credentials into chat, shell arguments, logs, or a repository. The checkout and installed runtime include `proxies.txt.example` with placeholders. Do not overwrite an existing list when copying an example. Protect your actual file:
+Successful capture binds `store-login` to the session generation.
+Alternatively, explicitly bind an existing approved record:
 
 ```sh
-chmod 600 "$HOME/.config/opencode/proxies.txt"
+npm run browser:sessions -- bind-auth main store-login
 ```
 
-No `prometheus-proxy-secrets` directory or per-proxy JSON files are required. The list must be a non-symlink, single-link regular file owned by you, mode **exactly `0600`**, outside all Git repositories. The configuration root may be `0755`; it must be owned by you and not group/world-writable. Ancestors must be real, trusted-owner directories protected from untrusted changes (root-owned sticky temporary ancestors are allowed for fixtures). Unsafe files are rejected, never repaired automatically.
+### Explicit rotation
 
-2. Merge a `proxy` block into your existing `<config_dir>/prometheus-browser.json`, preserving unrelated settings:
+1. Close the task browser.
+2. Finish or close all login helpers.
+3. Only for an explicitly requested rotation, run:
+
+   ```sh
+   npm run browser:sessions -- rotate main
+   npm run browser:sessions -- doctor
+   ```
+
+Never rotate in response to target HTTP 401/403 or a challenge.
+
+Rotation consumes the **shared global cursor** and increments generation.
+It can select the same proxy again after other allocations.
+With one pool member, it always selects the same proxy.
+Rotation does not guarantee a new endpoint or exit IP.
+
+By default, rotation clears authentication associations even if the proxy stays the same, without deleting saved cookies.
+Use `--retain-associations` only when you intend to preserve those associations, and heed the renewed-verification warning.
+Browser closure, elapsed time, tabs, navigation, and process restarts do not rotate the assignment.
+
+### Text format and pool edits
+
+| Input | Rule |
+| --- | --- |
+| Encoding | Strict UTF-8. An initial BOM is optional. |
+| Lines | LF or CRLF. Ignore blank lines and full-line `#` comments. |
+| Host | Hostname, IPv4, or bracketed IPv6, such as `[::1]:8000:USER:PASS`. |
+| Port | Decimal integer from `1` through `65535`. |
+| Transport | Implicit HTTP proxy. HTTPS destinations use CONNECT. |
+| Username | Nonempty. No colon. |
+| Password | Nonempty. Includes the entire remainder after the username delimiter. |
+| Credential characters | Preserve literal `:`, `#`, `@`, and spaces. Do not trim or URL-decode. |
+| Limits | At most 1 MiB and 4096 proxies. |
+
+The parser rejects control characters, malformed records, invalid UTF-8, empty lists, and duplicate canonical endpoint/username identities.
+Different passwords do not make duplicate identities valid.
+
+File order controls future round-robin allocations.
+Opaque `file-…` IDs derive from the canonical endpoint and username, excluding passwords and line numbers.
+Different usernames on one gateway have different identities.
+Reordering and password replacement preserve assignments; host, port, or username changes require explicit reconciliation.
+
+The runtime reads the list during creation, rotation, reconciliation, launch, login handoff, generation verification, and `doctor`.
+It does not reconfigure an active route from file edits.
+Invalid edits can block later validation or handoffs.
+Before identity changes, close affected browsers and helpers.
+
+After removing an assigned identity or cursor member, inspect `doctor` locally.
+Its ordered `proxies` array lists sanitized IDs in file order.
+Explicitly reconcile the session or cursor with those IDs.
+Never delete the registry or switch routes silently.
+
+### Existing JSON pools and migration
+
+An explicit `proxy.pool` array takes priority, so the runtime does not read the default text file.
+A legacy entry has this shape:
 
 ```json
-{
-  "channel": "chrome",
-  "executionMode": "headless",
-  "proxy": {
-    "session": "main",
-    "strategy": "round-robin"
-  }
-}
+{ "id": "proxy-a", "server": "http://host:8000", "credentialsFile": "prometheus-proxy-secrets/proxy-a.json" }
 ```
 
-There is no `poolFile` setting: omitting `pool` selects `proxies.txt` automatically. Merely creating the file does not enable proxying; omitting `proxy` preserves direct/non-proxy behavior. Explicitly invalid/empty `pool` settings are errors, not instructions to use the file.
+For unauthenticated proxies, `credentialsFile` is optional.
+Legacy credential JSON contains `username` and `password`.
+It requires mode `0600` under protected `0700` directories relative to `<config_dir>`.
+Only legacy credentials require that private parent.
+Credentials directly under the configuration root require that root to have mode `0700`.
 
-3. From the repository root, create the named routing session and check local configuration:
+To migrate an existing session:
 
-```sh
-export PROMETHEUS_CONFIG_DIR="$HOME/.config/opencode"
-npm run browser:sessions -- create main
-npm run browser:sessions -- doctor
-npm run browser:sessions -- show main
-```
+1. Stop its browser and login helpers.
+2. Populate `proxies.txt` privately.
+3. Remove `pool` from settings.
+4. Run `doctor`.
+5. Select the matching generated ID through `reconcile-session <session> <file-id>`.
+6. If necessary, reconcile the global cursor through `reconcile-cursor <file-id>`.
+7. Keep old credential files until you independently establish that they are unnecessary.
 
-For the installed runtime, replace `npm run browser:sessions --` with `node "$PROMETHEUS_CONFIG_DIR/prometheus-browser/browser-sessions.mjs"`. Every command also accepts `--config-dir <dir>`. Creating a session reserves its assignment even if a later browser launch fails; do not recreate it on each task.
+Generated IDs differ from handwritten legacy IDs, even for the same endpoint.
+Reconciling a changed assignment increments generation and clears authentication associations by default, while preserving saved authentication records.
+Do not migrate or reset assignments silently.
 
-4. Reconnect/reload the browser MCP after changing its settings. If this capability is not yet installed, stop affected tasks/login helpers and update the installed runtime using the staged installer above; editing the checkout alone does not update it. Browsing and reopening `main` reuse its proxy and generation. When login is required, get approval for the named site, pause automation during human control, and follow the login handoff procedure in the [browser reference](RESOURCE-SELECTION.md). Include the configured session:
+### Local diagnostics and recovery
 
-```sh
-node "$PROMETHEUS_CONFIG_DIR/prometheus-browser/opencode-browser-login.mjs" start --config-dir "$PROMETHEUS_CONFIG_DIR" --session main --name store-login --url https://example.com/ --origin https://example.com
-```
+`doctor` reads and validates local configuration, credentials, registry assignments, locks, and owner records.
+It makes no requests to proxies or public IP-check services and never reads saved authentication values or launches a browser.
+It neither acquires locks nor prunes records, and it leaves permissions, cursor, and state unchanged.
+Output contains sanitized IDs and fixed codes, not endpoints, credential paths, or secrets.
 
-The helper creates a private signed handoff internally; do not print or manually share it. Only after the user's reply, capture state and close the window:
+- Exit `1`: detected local errors.
+- Exit `0`: no detected local errors. This does not prove connectivity or authorize rotation.
+- Warnings: active locks or dead records.
 
-```sh
-node "$PROMETHEUS_CONFIG_DIR/prometheus-browser/opencode-browser-login.mjs" complete --config-dir "$PROMETHEUS_CONFIG_DIR" --name store-login
-```
+Concurrent activity can invalidate the result.
+`show` can prune conclusively dead owner records.
+For inspection without mutation, use `doctor`.
 
-Successful capture binds `store-login` to the session generation. Alternatively, explicitly bind an existing approved authentication record with `npm run browser:sessions -- bind-auth main store-login`. Verify task access in a fresh task context; saved state alone is not proof of access.
-
-5. To rotate, first close the task browser and finish or close all login helpers. Rotation is an explicit operator action, never a response to target 401/403 or a challenge:
-
-```sh
-npm run browser:sessions -- rotate main
-npm run browser:sessions -- doctor
-```
-
-Rotation consumes the **shared global cursor** and increments generation. It may select the same proxy again after other sessions consume the pool, and always does so with a single-member pool. It does not guarantee a new endpoint or exit IP. Authentication associations are cleared even when the same proxy is selected; saved cookies are not deleted. Use `--retain-associations` only intentionally and heed the verification warning. Closing the browser, elapsed time, tabs, navigation, and process restarts do not rotate.
-
-### Text Format and Editing the Pool
-
-- UTF-8 with an optional initial BOM; LF and CRLF line endings; blank lines and full-line `#` comments are ignored.
-- Hostnames, IPv4, and bracketed IPv6 (`[::1]:8000:USER:PASS`) are accepted. Ports must be decimal integers from `1` to `65535`. HTTP proxy transport is implicit; HTTPS destinations use CONNECT.
-- Username and password must be nonempty. Usernames cannot contain colons; the complete remainder after the username delimiter is the password, including literal `:`, `#`, `@`, and spaces. Credentials are not trimmed or URL-decoded. Control characters, malformed records, duplicate canonical endpoint/username identities (even with different passwords), empty lists, invalid UTF-8, files over 1 MiB, and more than 4096 proxies are rejected.
-- File order determines future round-robin allocations. IDs are opaque `file-…` values derived from the canonical endpoint and username, never the password or line number. Multiple usernames on one provider gateway are distinct identities. Reordering and password replacement preserve existing assignments; changing a host, port, or username does not.
-- File reads occur on session creation, rotation, reconciliation, launch, login handoff, generation verification, and `doctor`. Existing browser routes are not hot-reconfigured. Invalid edits may block later validation/handoffs; close affected browsers/helpers before identity changes.
-- After removing/changing an assigned identity or the cursor, review `doctor` locally. Its ordered `proxies` array lists sanitized IDs in file order. Explicitly reconcile the affected session and/or cursor using those IDs; never delete the registry or silently switch routes.
-
-### Existing JSON Pools and Migration
-
-Existing explicit `proxy.pool` arrays remain supported; they take precedence and the default text file is not read. Legacy entries use `{ "id": "proxy-a", "server": "http://host:8000", "credentialsFile": "prometheus-proxy-secrets/proxy-a.json" }`. `credentialsFile` remains optional for unauthenticated proxies. Legacy credential JSON contains `username` and `password`, is `0600`, and lives under protected `0700` directories relative to `<config_dir>`. Only that legacy format requires a private credential parent (or a `0700` config root when stored directly there).
-
-To switch an existing session from JSON to text, stop its browser/login helpers, populate `proxies.txt`, and remove `pool` from the settings. Generated IDs differ from legacy hand-written IDs, even for the same endpoint. Run `doctor`, intentionally select the corresponding new ID with `reconcile-session <session> <file-id>`, and reconcile the global cursor with `reconcile-cursor <file-id>` if needed. This changes generation and clears auth associations by default; saved authentication records are preserved. Do not silently migrate/reset assignments. Keep old credential files until you have independently confirmed they are no longer needed.
-
-### Local Diagnostics and Recovery
-
-`doctor` reads and validates local configuration, credential files, registry assignments, locks, and ownership records. It does not contact proxies or external IP-check services, read saved authentication values, launch a browser, acquire a lock, prune dead records, or change permissions/cursor/state. Output contains sanitized IDs and fixed codes, not endpoints, credential paths, or secrets. Exit `1` means detected errors; exit `0` means no detected local errors, not working connectivity or permission to rotate. Warnings describe active locks or dead records. Results can change during concurrent activity. `show` can prune conclusively dead ownership records; use `doctor` when inspection must not mutate files.
-
-| Diagnostic code | Operator action |
+| Code | Operator action |
 | --- | --- |
-| `proxy-list-missing` | Create the intended `<config_dir>/proxies.txt` privately; do not fall back to direct routing. |
-| `proxy-list-unsafe`, `proxy-list-in-repository` | Check exact `0600` file mode, owner, single-link regular-file status, safe directories, and location outside repositories. No automatic permission repair. |
-| `proxy-list-invalid-record`, `proxy-list-duplicate` | Privately inspect the reported line number; the report never includes its contents. |
-| `proxy-list-empty`, `proxy-list-invalid-encoding`, `proxy-list-too-large`, `proxy-list-too-many-records` | Supply a nonempty UTF-8 list within the 1 MiB / 4096-record limits. |
-| `registry-missing`, `selected-session-missing` | Check the selected configuration directory/session. Run `create <session>` only if intentionally creating a new session. |
-| `cursor-proxy-missing` | Review the pool edit, then explicitly choose the next allocation with `reconcile-cursor <proxy-id>`. Existing assignments do not change. |
-| `proxy-missing`, `endpoint-changed` | Restore the intended configuration, or use `reconcile-session <session> <proxy-id>` while inactive to accept an explicit assignment. This does not advance the pool cursor. |
-| `credentials-invalid` | Privately inspect the configured file's existence, ownership, permissions, link safety, and JSON shape. Replace credentials safely; the next launch uses them without rotation. |
-| `ownership-dead`, `lock-dead` | Doctor leaves records untouched. Normal lifecycle operations can reclaim conclusively dead records using OS process identity, never age alone. |
-| `lock-alive` | Another registry operation is active. Wait for that operation to finish, then request a fresh diagnostic if needed. |
-| `ownership-ambiguous`, `lock-ambiguous`, `registry-invalid` | Stop affected work and investigate locally. Do not delete locks, overwrite corrupt state, or reset the registry to force progress. Restore from a trusted private backup only after ownership and inactivity are established. |
+| `proxy-list-missing` | Create the intended list privately. Do not use direct routing. |
+| `proxy-list-unsafe`, `proxy-list-in-repository` | Verify exact mode `0600`, owner, single-link regular file, safe directories, and location outside repositories. Do not repair automatically. |
+| `proxy-list-invalid-record`, `proxy-list-duplicate` | Privately inspect the reported line number. Reports omit its contents. |
+| `proxy-list-empty`, `proxy-list-invalid-encoding`, `proxy-list-too-large`, `proxy-list-too-many-records` | Supply a nonempty UTF-8 list within 1 MiB and 4096 records. |
+| `registry-missing`, `selected-session-missing` | Verify the directory and session. Use `create <session>` only for an intended new session. |
+| `cursor-proxy-missing` | Review the pool edit. Explicitly select the next allocation through `reconcile-cursor <proxy-id>`. Existing assignments stay unchanged. |
+| `proxy-missing`, `endpoint-changed` | Restore the intended configuration, or explicitly use `reconcile-session <session> <proxy-id>` while inactive. The cursor stays unchanged. |
+| `credentials-invalid` | Privately verify existence, ownership, permissions, link safety, and JSON structure. Safe replacement applies at the next launch without rotation. |
+| `ownership-dead`, `lock-dead` | Leave diagnostic records unchanged. Normal lifecycle operations reclaim conclusively dead records through OS identity, never age alone. |
+| `lock-alive` | Wait for the active registry operation. Then request a new diagnostic if necessary. |
+| `ownership-ambiguous`, `lock-ambiguous`, `registry-invalid` | Stop affected work. Investigate locally. Do not delete locks, overwrite corrupt state, or reset the registry. |
 
-Reconciliation that changes a proxy ID **or endpoint** increments generation and clears auth associations by default. Explicit `--retain-associations` retains them with a warning. Reconciliation of an unchanged assignment does nothing. No recovery command authorizes routing around a target denial, direct fallback, or replay of an interrupted action.
+Restore a trusted private backup only after establishing ownership and inactivity.
+Reconciliation of a changed proxy ID **or endpoint** increments generation and clears associations by default.
+Explicit `--retain-associations` preserves them with a warning.
+An unchanged assignment causes no update.
+No recovery command authorizes bypass of denial, direct fallback, or replay of an interrupted action.
 
-### Qualification and Deferred Work
+### Current limits
 
-Local qualification on 2026-11-13 used macOS arm64, Node `24.22.1`, and Playwright `1.63.0`:
+- There is no supported session deletion command.
+  Do not edit the registry manually to remove entries.
+- Timed rotation, per-request rotation, health failover, geographic selection, and provider APIs remain outside scope.
+  SOCKS5, HTTPS-to-proxy transport, and external-CDP proxy routing also remain outside scope.
+  The browser does not silently fall back to another route.
 
-| Host / channel / task mode | Browser version | Evidence |
-| --- | --- | --- |
-| macOS / default Chromium / headless | `153.0.8010.12` | Full browser suite and local proxy/session fixtures passed. |
-| macOS / installed Chrome / headless | `157.0.8103.51` | Full browser suite and local proxy/session fixtures passed. |
-| Linux / default Chromium and Chrome / headless and virtual-display | Not yet measured | Workflow added; execution and review still required. |
+## Updates, rollback, and recovery
 
-Linux/Xvfb-only tests were skipped on macOS, not counted as passing qualification. Controller regressions also passed. These results do not qualify live-provider routing or interactive human login.
+### Lost task context
 
-Text-list qualification on 2026-11-15 used the same macOS arm64 / Node `24.22.1` / Playwright `1.63.0` environment and the browser versions above. Controlled fixtures passed for both default Chromium and installed Chrome: text parsing/private storage, legacy JSON compatibility, session lifecycle, authenticated HTTP and HTTPS CONNECT, transfers, login capture/hydration, process restart, and failure without direct fallback. Path/permission-swap rejection and manifest exclusion of credential-bearing lists also have local regression coverage. A separately supplied local list passed format/permission validation only; no real-provider connectivity or public exit IP was tested.
+1. Inspect `browser_status`.
+   An observed closed context or disconnected browser reports `contextOpen: false` and requires explicit navigation.
+2. Treat an interrupted action as unknown.
+   Inspect its original page or independent application evidence if available.
+   A new context cannot reconstruct the old outcome.
+   Do not replay automatically.
+3. If human takeover or handback inspection lost its original session, explicitly call `browser_close` first.
+   Do not report successful original handback.
+4. When appropriate, request fresh `browser_navigate` in the same configured mode.
 
-- Linux CI is defined in `.github/workflows/browser-proxy.yml` for Playwright Chromium and installed Chrome in headless and Xvfb modes. Linux remains **unverified until those runs complete successfully and are reviewed**; creating the workflow is not a passing result.
-- CI uses controlled local proxy/destination fixtures and synthetic login capture. Real-provider connectivity, provider sticky-session behavior, and human-operated graphical login require separately approved host/provider testing. No live-provider or public exit-IP check runs automatically.
-- Session deletion remains deferred. There is no supported deletion command; do not edit the registry manually to remove old entries. A future deletion API needs inactive-owner checks and explicit handling of pending handoffs while preserving saved authentication records.
-- Specific proxy selection is already supported by `reconcile-session <session> <proxy-id>`; a second selection API is unnecessary.
-- Timed/per-request rotation, automatic health-based failover, geographic/provider APIs, SOCKS5, HTTPS-to-proxy transport, and external-CDP proxying remain out of scope. They need separate routing and authentication designs and qualification, not silent fallback.
+Recovery reacquires the pinned proxy session on its existing generation without rotation.
+An attached CDP browser must be dedicated to automation.
+Its unrelated tabs and profile remain externally owned.
+Never use recovery after HTTP 401/403, challenge, or proxy denial as a way to retry access.
 
-## Updates, Rollback, and Recovery
+### Update
 
-- **Lost task context:** Check `browser_status`; an observed closed context or disconnected browser reports `contextOpen: false` and requests explicit navigation. Treat an interrupted action as unknown and inspect its original page or independent application evidence if available; a new context cannot reconstruct that outcome. Do not replay it automatically. When appropriate, request a fresh `browser_navigate` in the same configured mode. A pinned proxy session is reacquired on its existing generation, not rotated. If a human takeover or handback inspection lost its original session, first explicitly `browser_close`; do not claim the original handback succeeded. An attached CDP browser must be dedicated to automation, and its unrelated tabs and profile remain externally owned. Never use recovery as a response to 401/403, a challenge, or proxy denial.
-- **Update:** Run `install --quiescent` from an updated checkout. Unchanged files no-op after a readiness check; changed files publish a staged update and archive the prior runtime under `prometheus-browser-backups/`.
-- **Rollback or Remove:** Stop affected work and run:
+Stop affected tasks and login helpers.
+From an updated checkout, run `install --quiescent`.
+Unchanged files require only a readiness check.
+Changed files publish through a staged update.
+The installer archives the prior runtime under `prometheus-browser-backups/`.
+
+### Rollback or removal
+
+Stop affected work first.
+Run the required operation:
 
 ```sh
 node scripts/browser-profile.mjs rollback --config-dir "$HOME/.config/opencode" --quiescent
 node scripts/browser-profile.mjs remove --config-dir "$HOME/.config/opencode" --quiescent
 ```
 
-- **Drift and Interrupted Runs:** Modified owned files or config fields report `drift` and block overwrite. An interrupted transaction leaves `prometheus-browser-pending.json`; inspect `status` and run `rollback --quiescent` to recover.
+### Drift or interrupted installation
+
+If owned files or configuration fields have changed, the installer reports `drift` and blocks overwrite.
+An interrupted transaction leaves `prometheus-browser-pending.json`.
+Inspect `status`, then run `rollback --quiescent` for recovery.
 
 ## Verification
+
+Run from the repository root:
 
 ```sh
 node --test tests/integration/browser_profile.test.mjs
@@ -194,8 +393,7 @@ npm test
 ```
 
 Set `PROMETHEUS_TEST_BROWSER_CHANNEL=chrome` to include installed Chrome in channel and installed-runtime tests.
-
-For action outcomes, frames, records, change observation, and profile evidence run:
+For action outcomes, frames, records, change observation, profiles, and proxy sessions, run:
 
 ```sh
 node --test tests/integration/browser_observations.test.mjs
@@ -204,12 +402,25 @@ node --test tests/integration/browser_proxy_list.test.mjs
 node --test tests/integration/browser_sessions.test.mjs
 ```
 
-Qualify installed Chrome separately on Linux and macOS. Record the browser and Playwright versions and the selected channel and mode. A missing browser or display dependency is an unverified configuration, not a passing result. Profile evidence is for controlled fixtures; it is not a claim of anonymity or access to a protected site. Similarly, proxy session pinning records the configured pool assignment (`routing: "configured"`), not proof of external exit IP: upstream proxy providers may rotate exit IPs or expire sticky sessions independently, and initial Chromium-engine proxy support does not provide OS-wide DNS or WebRTC leak containment.
+Qualify installed Chrome separately on Linux and macOS.
+Record browser and Playwright versions, channel, and mode.
+Missing browser or display dependencies mean unverified, not passing.
+Profile evidence from controlled fixtures does not establish anonymity or access to a protected site.
 
-On a Linux host with Playwright browsers, `xvfb`, and `xauth` installed, reproduce virtual-display proxy qualification with:
+Proxy pinning reports `routing: "configured"`, not a verified exit IP.
+Providers can rotate exits or expire sticky sessions independently.
+Initial Chromium support does not contain all OS-wide DNS or WebRTC leaks.
+
+### Linux virtual-display verification
+
+Require a Linux host with Playwright browsers, `xvfb`, and `xauth`.
+Run:
 
 ```sh
 PROMETHEUS_TEST_PROXY_MODE=virtual-display xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24 -nolisten tcp' env PROMETHEUS_VIRTUAL_DISPLAY=1 node --test --test-timeout=300000 tests/integration/browser_proxy_list.test.mjs tests/integration/browser_sessions.test.mjs tests/integration/browser_proxy.test.mjs
 ```
 
-Add `PROMETHEUS_TEST_BROWSER_CHANNEL=chrome` to qualify installed Chrome separately. Proxy fixtures print the tested platform, architecture, Node, Playwright, browser version, channel, and task mode. The Xvfb login fixture is headed for this run, but does not qualify a human-accessible desktop.
+Add `PROMETHEUS_TEST_BROWSER_CHANNEL=chrome` for separate installed-Chrome qualification.
+Fixtures print platform, architecture, Node, Playwright, browser version, channel, and task mode.
+The Xvfb login fixture uses headed mode.
+It does not qualify a human-accessible desktop.

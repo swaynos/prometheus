@@ -1,37 +1,72 @@
 # 2captcha integration
 
-`scripts/opencode-browser-2captcha.mjs` implements **64 canonical task types plus two documented aliases** from 2captcha's API v2 catalog, reviewed 2026-11-15. This includes reCAPTCHA v2/v3 and Enterprise, Turnstile, image/audio recognition, and structured/cookie answers. The executable catalog is `CAPTCHA_TYPES` in `opencode-browser-captcha-types.mjs`; unknown task names and fields fail closed rather than becoming unchecked API passthrough. This is a versioned catalog, not a promise of automatic support for future provider additions or legacy API v1 methods. The docs inconsistently mention `GridTaskProxyless` and `IncapsulaTask`; these aliases normalize to their concrete request-example names, `GridTask` and `ImpervaTask`.
+## Purpose and support
 
-**Provider support is not universal browser autodetection.** The browser automatically recognizes a single visible standalone Turnstile or reCAPTCHA v2/Enterprise widget with a simple own-global `data-callback`. Other variants require an explicitly configured trusted site adapter, described below. Managed/full-page access denials, including Google's unusual-traffic pages, remain stop conditions, regardless of provider support.
+The provider adapter validates requests and responses for **64 canonical task types and two aliases** from 2captcha's API v2 catalog, including reCAPTCHA, Turnstile, and image and audio recognition.
+Controlled fixtures exercise the catalog; they do not establish acceptance by the live provider.
 
-Solving is disabled unless the `captcha` setting includes a complete policy and the operator explicitly initializes its ledger; every solve also requires explicit paid authorization and limits. `browser_challenge_inspect` is read-only and reports candidates, not guaranteed solvability or ledger availability. Navigation never initiates solving. A provider solution is not proof of site acceptance.
+The executable catalog is `CAPTCHA_TYPES` in `opencode-browser-captcha-types.mjs`.
+The adapter rejects unknown task names and fields before they reach the provider.
+This versioned catalog does not automatically support future additions or legacy API v1 methods.
+
+To resolve inconsistent provider naming, the adapter recognizes two aliases.
+The adapter converts `GridTaskProxyless` to `GridTask` and `IncapsulaTask` to `ImpervaTask`, as used in concrete request examples.
+
+**Provider support does not imply automatic browser detection.**
+Automatic detection requires one visible standalone Turnstile or reCAPTCHA v2/Enterprise widget.
+Its `data-callback` must name a simple own-global function.
+Other variants require an explicitly configured trusted site adapter.
+Stop on managed/full-page access denial, including Google's unusual-traffic pages.
+Provider support does not remove that restriction.
+
+Solving remains disabled without a complete `captcha` policy and an explicitly initialized ledger.
+Every solve also requires explicit paid authorization and limits.
+Use read-only `browser_challenge_inspect` to identify candidates; its results do not guarantee solvability or ledger availability.
+Navigation never starts a solve.
+A provider solution does not prove site acceptance.
 
 ## Proxy routing and disclosure
 
-Browser proxy credentials belong in `<config_dir>/proxies.txt` (`HOST:PORT:USER:PASS` per line, `0600`), not the API-key file. See [proxy setup](BROWSER-OPERATIONS.md#proxy-setup-and-session-lifecycle).
+Store browser proxy credentials in `<config_dir>/proxies.txt`, not the API-key file.
+Use one `HOST:PORT:USER:PASS` record per line and file mode `0600`.
+See [proxy setup](BROWSER-OPERATIONS.md#proxy-setup-and-session-lifecycle).
 
-The Node connection to `api.2captcha.com` is a **separate direct service channel**. The worker's route is configured independently:
+The Node connection to `api.2captcha.com` uses a **separate direct service channel**.
+Configure the solving worker's route separately:
 
-- `captcha.proxyMode: "browser"` explicitly permits sending the browser's pinned upstream proxy endpoint and credentials to 2captcha for supported network tasks. Proxyless task names with a documented proxy counterpart are converted to that counterpart. The loopback relay is never sent. Ownership and generation are rechecked before using the pinned capability; pages cannot supply or replace its proxy.
-- `captcha.proxyMode: "proxyless"` explicitly allows the worker to use its own IP while the browser remains on its pinned proxy. IP binding can make the result unusable.
-- With a proxied browser and no `proxyMode`, network solves fail before dispatch with `proxy_disclosure_required`. Merely configuring `proxies.txt` never authorizes third-party credential disclosure.
-- reCAPTCHA v3 (including Enterprise via `isEnterprise`) is **proxyless-only** in the documented API. `"browser"` routing fails with `proxy_not_supported`, without fallback.
-- Proxy-required types need `"browser"` and an owned browser proxy. Image, text, audio and other recognition-only tasks do not navigate on the worker and need no proxy disclosure.
+- `captcha.proxyMode: "browser"` permits disclosure of the pinned upstream proxy endpoint and credentials to 2captcha for supported network tasks.
+  The adapter selects the documented proxy task counterpart when one exists.
+  It never sends the loopback relay.
+  It verifies ownership and generation again before using the pinned capability.
+  Pages cannot supply or replace the proxy.
+- `captcha.proxyMode: "proxyless"` permits the worker to use its own IP while the browser retains its pinned proxy.
+  IP binding can make the answer unusable.
+- Without `proxyMode`, network solves from a proxied browser stop before dispatch with `proxy_disclosure_required`.
+  A configured `proxies.txt` does not authorize third-party credential disclosure.
+- Documented reCAPTCHA v3, including Enterprise through `isEnterprise`, is **proxyless-only**.
+  `"browser"` routing returns `proxy_not_supported`.
+  It does not fall back.
+- Proxy-required types need `"browser"` and an owned browser proxy.
+  Recognition-only tasks, such as image, text, and audio, do not navigate on the worker.
+  They need no proxy disclosure.
 
-The browser currently supports HTTP upstream proxies only; this integration does not add SOCKS support to browser routing. The low-level provider validator accepts the documented `http`, `socks4`, and `socks5` task fields for independent internal callers.
+Browser routing supports HTTP upstream proxies only; this integration does not add SOCKS browser routing.
+For independent internal callers, the provider validator accepts documented `http`, `socks4`, and `socks5` task fields.
 
 ## Coverage matrix
 
-All rows have synthetic request/response validation and controlled Chromium site-adapter tests. **None is live paid-solve qualified by these tests.** A controlled callback accepting fixture data is not evidence of acceptance by the real CAPTCHA vendor.
+All rows have synthetic request/response validation and controlled Chromium site-adapter tests.
+**These tests do not qualify live paid solves.**
+Acceptance of fixture data does not prove acceptance by the real CAPTCHA vendor.
 
 | Family | API v2 task names | Worker proxy | Browser application |
 | --- | --- | --- | --- |
 | reCAPTCHA v2 | `RecaptchaV2Task[Proxyless]` | Either | Automatic visible standalone callback or site adapter |
 | reCAPTCHA v2 Enterprise | `RecaptchaV2EnterpriseTask[Proxyless]` | Either | Automatic visible standalone callback or site adapter |
-| reCAPTCHA v3 / Enterprise | `RecaptchaV3TaskProxyless` (`isEnterprise`) | Proxyless only | Site adapter (action/score supplied explicitly) |
+| reCAPTCHA v3 / Enterprise | `RecaptchaV3TaskProxyless` (`isEnterprise`) | Proxyless only | Site adapter with explicit action and score |
 | Turnstile | `TurnstileTask[Proxyless]` | Either | Automatic visible standalone callback or site adapter |
 | Arkose/FunCaptcha | `FunCaptchaTask[Proxyless]` | Either | Site adapter |
-| GeeTest v3/v4 | `GeeTestTask[Proxyless]` (`version: 4`, `initParameters`) | Either | Site adapter; fresh v3 challenge required |
+| GeeTest v3/v4 | `GeeTestTask[Proxyless]` (`version: 4`, `initParameters`) | Either | Site adapter. Requires a fresh v3 challenge. |
 | Capy | `CapyTask[Proxyless]` | Either | Site adapter |
 | KeyCAPTCHA | `KeyCaptchaTask[Proxyless]` | Either | Site adapter |
 | Lemin | `LeminTask[Proxyless]` | Either | Site adapter |
@@ -49,35 +84,102 @@ All rows have synthetic request/response validation and controlled Chromium site
 | Basilisk | `BasiliskTask[Proxyless]` | Either | Site adapter |
 | Alibaba | `AlibabaTask[Proxyless]` | Either | Site adapter |
 | Yandex SmartCaptcha | `YandexSmartCaptchaTask[Proxyless]` | Either | Site adapter |
-| DataDome | `DataDomeSliderTask` | Required | Site adapter; managed denial still stops |
+| DataDome | `DataDomeSliderTask` | Required | Site adapter. Stop on managed denial. |
 | CaptchaFox | `CaptchaFoxTask` | Required | Site adapter |
 | VK | `VKCaptchaTask` | Required | Site adapter |
 | Hunt | `HuntTask` | Required | Site adapter |
-| TSPD / Imperva | `TspdTask`, `ImpervaTask` | Required | Site adapter; managed denial still stops |
+| TSPD / Imperva | `TspdTask`, `ImpervaTask` | Required | Site adapter. Stop on managed denial. |
 | Image/text/audio | `ImageToTextTask`, `TextCaptchaTask`, `AudioTask` | Not applicable | Site adapter |
-| Rotation/click/grid | `RotateTask`, `CoordinatesTask`, `GridTask` | Not applicable | Site adapter; reCAPTCHA/FunCaptcha grids use `imgType` |
+| Rotation/click/grid | `RotateTask`, `CoordinatesTask`, `GridTask` | Not applicable | Site adapter. reCAPTCHA/FunCaptcha grids use `imgType`. |
 | Drawing/boxes/drag | `DrawAroundTask`, `BoundingBoxTask`, `DragAndDropTask` | Not applicable | Site adapter |
 | Image variants | `TemuImageTask`, `VKCaptchaImageTask`, `SmartCaptchaTask`, `PazlCaptchaTask` | Not applicable | Site adapter |
 
-`[Proxyless]` means both the base and suffixed names exist. Solutions are validated by family: tokens, text, numeric rotations, points, grid selections, polygons, boxes, GeeTest fields, or cookie/domain structures—not assumed to contain `solution.token`. Documented example aliases `websiteUrl` and `UserCertifyId` normalize to `websiteURL` and `userCertifyId`; ambiguous duplicate spellings reject. Network URLs remain HTTPS-only without credentials/fragments. Inputs and responses are bounded to 16 MiB total, individual media fields to 10 MiB encoded and instruction images to 100 KiB decoded.
+`[Proxyless]` indicates both a base task name and a name with that suffix.
+The validator checks each solution by family rather than assuming every answer contains `solution.token`.
+Families include tokens, text, rotations, points, grid selections, polygons, boxes, GeeTest fields, and cookie/domain structures.
+
+The adapter converts example aliases `websiteUrl` and `UserCertifyId` to `websiteURL` and `userCertifyId`.
+Duplicate spellings stop validation.
+Network URLs require HTTPS and must not contain credentials or fragments.
+
+| Data | Limit |
+| --- | --- |
+| Each complete input or response | 16 MiB |
+| Each encoded media field | 10 MiB |
+| Each decoded instruction image | 100 KiB |
 
 ## Credentials
 
-For a checkout, create a project-root `.env` with mode `0600` and add `TWOCAPTCHA_API_KEY=your-key` (see `.env.example`); it is Git-ignored. Never commit or share it. Start the browser runtime with the project root as its working directory. The default is exactly `.env` in the process working directory, with no ancestor search. For an installed runtime or another working directory, set an absolute `envFile` in the `captcha` configuration to the intended `.env` path. The file must be an owner-only, single-link regular file owned by the current user, not a symlink; its directories must not be writable by untrusted users. Other variables in the file are not imported. Single-line quoted and unquoted values and comments are supported; malformed lines or duplicate key assignments fail closed. The adapter never calls the provider on import or validation.
+### Environment file
 
-Internal callers opt in with `{enabled: true, provider: '2captcha', timeoutMs, pollIntervalMs}`; there is no endpoint override. Precedence is `TWOCAPTCHA_API_KEY` in the process environment (even if blank, which fails), then an explicitly configured legacy `keyFile`, otherwise `envFile` or the working-directory `.env`. `envFile` and `keyFile` cannot both be configured. Legacy `keyFile` must be an absolute path outside any Git repository, a non-symlink, single-link regular file owned by the current user and inaccessible to group or others. Its immediate parent must also be a non-symlink directory owned by the current user and inaccessible to group or others; protect all ancestor directories from untrusted changes.
+1. In a source checkout, create `.env` at the project root with mode `0600`.
+2. Add `TWOCAPTCHA_API_KEY=your-key`. See `.env.example`.
+   Git ignores the file. Never commit or share it.
+3. Start the browser runtime with the project root as its working directory.
+4. For another working directory or an installed runtime, configure an absolute `captcha.envFile` path to the intended `.env`.
 
-Repository detection is conservative: even a non-repository directory containing both `HEAD` and `objects` can be rejected as repository-shaped. Use a dedicated private directory without those entries rather than weakening the check.
+By default, the adapter reads only `.env` in the process working directory, without searching ancestors.
+The file must be a regular file owned by the current user, with one link and owner-only access.
+It must not be a symlink.
+Protect its directories from untrusted writes.
 
-Each `createCaptchaTask(config, task, {proxy?, languagePool?})` object deep-snapshots and validates its task and permits one `solve` attempt. `onReady(solution, signal)` receives a private, immutable, typed solution; the public result contains only status/outcome. `createTurnstileTask` remains a compatible token-string wrapper. Optional `languagePool` (`en` or `rn`) is a top-level provider request field for recognition tasks, not a task field.
+The adapter reads the requested key without importing other variables.
+It accepts comments and single-line values, quoted or unquoted.
+Malformed lines or duplicate key assignments stop validation.
+Import and validation never call the provider.
 
-Authorization and reservation hooks must both explicitly return `true` before a request is sent. The MCP owner supplies a durable reservation hook; arbitrary internal callers supplying permissive hooks do not acquire that protection. An ambiguous create response is `unknown`, never automatically retried. Polling failure after creation is `submitted`, not authorization to resubmit. Provider task IDs are not persisted or exposed; reconciliation of a lost create response requires external operator evidence.
+### Key selection
 
-Errors contain fixed codes and outcome only, not provider messages or payloads. Task strings, solution strings and shared proxy values are registered for MCP text redaction, including console and DOM/evaluate output. This cannot prevent a page deliberately transforming, splitting, or exfiltrating a value, or placing it in images/files/network requests. Do not use untrusted site callbacks. See [2captcha's API documentation](https://2captcha.com/api-docs).
+Internal callers enable the adapter with `{enabled: true, provider: '2captcha', timeoutMs, pollIntervalMs}`.
+There is no endpoint override.
+The key source priority is:
+
+1. Process environment `TWOCAPTCHA_API_KEY`.
+   A present but blank value fails rather than selecting another source.
+2. Explicit legacy `keyFile`.
+3. Configured `envFile`, or `.env` in the working directory.
+
+Do not configure both `envFile` and `keyFile`.
+Legacy `keyFile` requires an absolute path outside all Git repositories.
+The file must be regular, current-user-owned, single-link, and not a symlink.
+Group and others must have no access.
+Its immediate parent must be a real directory owned by the current user, also inaccessible to group and others.
+Protect all ancestors from untrusted changes.
+
+Repository detection is conservative.
+A non-repository directory with both `HEAD` and `objects` can appear to be a repository.
+Use a dedicated private directory without those entries.
+Do not weaken the check.
+
+## Provider task lifecycle
+
+Each `createCaptchaTask(config, task, {proxy?, languagePool?})` object copies and validates the complete task, then permits one `solve` attempt.
+`onReady(solution, signal)` receives a private, immutable, typed solution.
+The public result contains only status and outcome.
+`createTurnstileTask` retains the compatible token-string interface.
+For recognition tasks, optional `languagePool` accepts `en` or `rn` at the top level of the provider request.
+Do not place it inside the task.
+
+Before dispatch, both authorization and reservation hooks must explicitly return `true`.
+The MCP owner supplies a durable reservation hook.
+Permissive hooks from other internal callers do not provide that protection.
+
+An ambiguous create response means `unknown`; the adapter never retries it automatically.
+Polling failure after creation means `submitted`, which does not authorize resubmission.
+The adapter does not persist or expose provider task IDs.
+A lost create response requires external operator evidence for reconciliation.
+
+Errors contain only fixed codes and outcome, never provider messages or payloads.
+The runtime registers task strings, solution strings, and shared proxy values for MCP text redaction.
+This includes console and DOM/evaluate output.
+Redaction cannot prevent a page from transforming, splitting, or exporting a value.
+It cannot prevent disclosure through images, files, or network requests.
+Do not use untrusted site callbacks.
+See [2captcha API documentation](https://2captcha.com/api-docs).
 
 ## Trusted site adapters
 
-Configure an adapter under an approved policy site when automatic widget handling is insufficient:
+If automatic widget handling is insufficient, configure an adapter under an approved policy site:
 
 ```json
 {
@@ -92,7 +194,9 @@ Configure an adapter under an approved policy site when automatic widget handlin
 }
 ```
 
-These are names of **trusted own-global functions on your application**, not arbitrary expressions or code supplied through MCP. `getCaptchaTask()` synchronously returns the exact provider task, for example:
+The callback names refer to **trusted own-global functions in your application**.
+They are not expressions or code supplied through MCP.
+`getCaptchaTask()` returns the exact provider task synchronously:
 
 ```js
 window.getCaptchaTask = () => ({
@@ -104,19 +208,51 @@ window.getCaptchaTask = () => ({
   isEnterprise: true,
 });
 window.applyCaptchaSolution = solution => {
-  // Submit to your application's verification endpoint. Only show
-  // #site-confirmed after your server has actually accepted the solution.
+  // Submit to the application's verification endpoint.
+  // Show #site-confirmed only after the server accepts the solution.
   verifyOnYourServer(solution.gRecaptchaResponse || solution.token);
 };
 ```
 
-For recognition tasks return bounded base64 image/audio data in their documented fields. Extraction must be a read of already-available data, not a network operation that generates a new challenge on every call. The task is re-read immediately before application and must still match. Do not return cookies/authentication unrelated to the CAPTCHA. The page must not return proxy fields; the owner binds them privately. If `websiteURL` or `redirectUri` is present it must exactly match the active document, not another origin or page.
+For recognition tasks, return bounded base64 image/audio data in the documented fields.
+Read data that is already available.
+Do not generate a new challenge through a network request on each read.
+Immediately before applying a solution, the runtime rereads the task and requires an exact match.
+Do not return cookies or authentication unrelated to the CAPTCHA.
+The owner binds proxy fields privately; the page must not return them.
+If present, `websiteURL` or `redirectUri` must exactly match the active document.
+Another origin or page is not permitted.
 
-The widget must be visible and unique. The widget, document, callback identities, task data and owner binding must remain unchanged until application. An absent/unconfigured site adapter is not synthesized by crawling arbitrary sites or guessing callbacks. Asynchronous solution callbacks may submit to your server, but acceptance must become visible within the single deadline on the original document; navigation invalidates the solve. Cookie answers are data only: the runtime never blindly imports provider cookies into other origins. Your trusted adapter must apply/verify the supported answer appropriately.
+The widget must be visible and unique.
+Until application, the widget, document, callback identities, task data, and owner binding must remain unchanged.
+The runtime does not invent missing adapters through site crawling or guessed callbacks.
+Asynchronous solution callbacks may submit to your server.
+Acceptance must become visible on the original document within the single deadline.
+Navigation invalidates the solve.
+Cookie answers are data only.
+The runtime does not automatically import provider cookies into other origins.
+Your trusted adapter must apply and verify the supported answer.
 
 ## Policy and accounting
 
-Create an owner-only directory outside all Git repositories, with protected ancestors. Explicitly initialize once with `node scripts/browser-budget.mjs init /absolute/private/directory` from the source checkout, or `node <config_dir>/prometheus-browser/browser-budget.mjs init /absolute/private/directory` in an installed runtime; an existing or corrupt ledger is never automatically reset. Configure the browser `captcha` object with the existing key settings plus this example shape (replace every value):
+### Initialization
+
+1. Create an owner-only directory outside all Git repositories.
+   Protect its ancestors.
+2. From the source checkout, initialize the ledger once:
+
+   ```sh
+   node scripts/browser-budget.mjs init /absolute/private/directory
+   ```
+
+   For an installed runtime, use:
+
+   ```sh
+   node <config_dir>/prometheus-browser/browser-budget.mjs init /absolute/private/directory
+   ```
+
+3. Add a policy to the browser `captcha` object alongside the key settings.
+   Replace every example value:
 
 ```json
 "policy": {
@@ -128,20 +264,107 @@ Create an owner-only directory outside all Git repositories, with protected ance
 }
 ```
 
-Amounts are integer millionths of USD. Set the estimate conservatively from the provider's current pricing; the provider does not offer a per-task price cap in this integration, so **an actual charge can exceed the estimate and configured caps**. The cap bounds reservations, not an independently enforceable provider charge ceiling. A higher reported actual is recorded and blocks further reservations as appropriate. The per-call `max_cost_usd` must cover the estimate; it is not a provider-enforced maximum charge. Each call submits at most one task.
+The runtime never automatically resets an existing or corrupt ledger.
 
-Reservations are serialized across processes and fsynced before dispatch. **At most one unresolved reservation is permitted per ledger.** Every new reservation is blocked while any entry has an unknown actual charge, even across process restart or a UTC day boundary; this includes timeouts, crashes, missing/malformed costs, failed receipt persistence and potentially tasks stopped before dispatch. The barrier exists because an unrecorded actual may exceed the estimate. Counts and `max(estimate, actual)` are charged to both lifetime and the UTC creation day. The estimate is never automatically released even for a lower actual, rejection, cancellation, or unknown response. The same document/task/proxy-generation hash cannot be reserved twice in the same ledger, including after restart; changed task data is a different identity, not proof that an earlier task was free. A UTC day before the last reservation day is rejected to avoid rollback resets. A missing, unsafe, full, locked, or corrupt ledger fails closed. There is no automatic reset and no built-in release; changing budgets, archiving/replacing a ledger, or manually removing storage requires explicit operator review of all unresolved tasks and charges. Never discard unknown commitments to make capacity available.
+### Reservation limits
 
-When a trustworthy external receipt is available, `node scripts/browser-budget.mjs reconcile /absolute/private/directory OPERATION_HASH ACTUAL_MICROS` records the actual once; find the hash only in the private ledger. In an installed runtime, run `node <config_dir>/prometheus-browser/browser-budget.mjs` instead. Reconcile only with independently verified evidence; do not guess zero to clear the barrier. Reconciliation removes the unknown-actual barrier for that entry but never reduces the retained reservation or task count; an actual exceeding the caps continues to block new reservations. A receipt from `getTaskResult.cost` is rounded upward to microdollars; absent or malformed cost remains unknown. Do not put provider task IDs, tokens, keys, or proxy credentials in the ledger.
+Amounts are integer millionths of USD.
+Set a conservative estimate from current provider prices.
+This integration has no provider-enforced per-task price cap.
+**An actual charge can exceed the estimate and configured caps.**
+Caps limit reservations, not provider charges.
+The ledger records higher reported actual charges and blocks further reservations when required.
+Per-call `max_cost_usd` must cover the estimate.
+It does not guarantee a maximum charge.
+Each call submits at most one task.
 
-Only configure a selector that is a trustworthy site-specific acceptance signal, absent before callback and visible freshly afterward. The owner binds the solve to its active document/context and proxy session generation; external-CDP contexts are not eligible because they are not exclusively owned. Cancellation may leave already-dispatched provider or browser operations unknown. The MCP is serialized, and cancellation notifications can interrupt an outstanding solve; an already-dispatched page callback cannot be undone or safely replayed.
+Reservations run in sequence across processes.
+The runtime uses `fsync` before dispatch.
+**Each ledger permits at most one unresolved reservation.**
+An unknown actual charge blocks every new reservation.
+This restriction survives process restart and a UTC day boundary.
 
-The internal lifecycle accepts an `AbortSignal` at inspection and uses one `timeoutMs` deadline from inspection through verification. The supported visible widget and managed-challenge policy are checked again before callback dispatch, and managed-denial evidence is checked again before reporting acceptance. A cancelled or timed-out browser evaluation already dispatched cannot be undone: its application outcome is unknown, never verified on that basis, and must be inspected rather than retried automatically. Provider `submitted` describes provider submission, not proof of callback or site acceptance.
+Unknown charges can follow timeout, crash, missing or malformed cost, or failed receipt persistence.
+They can also follow a task stopped before dispatch.
+The restriction exists because an unrecorded actual charge can exceed the estimate.
 
-Main-frame navigation or page/context closure aborts a pending provider wait immediately. This does not establish that a dispatched task was free: its outcome may remain unknown, and it must not be retried automatically.
+The ledger charges task counts and `max(estimate, actual)` against lifetime limits and the UTC creation day.
+It never automatically releases the estimate.
+That applies after a lower actual charge, rejection, cancellation, or unknown response.
+
+The same document/task/proxy-generation hash cannot receive a second reservation in one ledger, even after restart.
+Changed task data creates a different identity, but does not prove that an earlier task was free.
+The ledger rejects a UTC day before the last reservation day to prevent clock-rollback resets.
+
+A missing, unsafe, full, locked, or corrupt ledger stops the operation.
+There is no automatic reset or built-in release.
+Before changing budgets, archiving or replacing a ledger, or removing storage, explicitly review all unresolved tasks and charges.
+Never discard unknown commitments to make capacity available.
+
+### Reconciliation
+
+Once you have an independently verified external receipt, record the actual charge:
+
+```sh
+node scripts/browser-budget.mjs reconcile /absolute/private/directory OPERATION_HASH ACTUAL_MICROS
+```
+
+Find the operation hash only in the private ledger.
+For an installed runtime, use `node <config_dir>/prometheus-browser/browser-budget.mjs` instead.
+Reconciliation records the actual once.
+Do not guess zero to remove the unknown-charge barrier.
+
+Reconciliation resolves that entry's unknown charge, but never reduces the retained reservation or task count.
+An actual charge above the caps continues to block new reservations.
+The runtime rounds `getTaskResult.cost` upward to microdollars.
+An absent or malformed cost remains unknown.
+Do not put provider task IDs, tokens, keys, or proxy credentials in the ledger.
+
+### Acceptance and cancellation
+
+Configure only a trustworthy site-specific acceptance selector.
+Its signal must be absent before the callback and newly visible afterward.
+The owner binds the solve to the active document, context, and proxy session generation.
+External-CDP contexts are ineligible because the runtime does not own them exclusively.
+
+Cancellation can leave dispatched provider or browser operations unknown.
+MCP operations run in sequence.
+Cancellation notifications can interrupt a pending solve.
+The runtime cannot undo or safely replay a page callback after dispatch.
+
+The internal lifecycle accepts an `AbortSignal` at inspection.
+One `timeoutMs` deadline covers inspection through verification.
+Before callback dispatch, the runtime verifies the supported visible widget and managed-challenge policy again.
+Before reporting acceptance, it inspects managed-denial evidence again.
+
+A cancelled or timed-out browser evaluation cannot be undone after dispatch.
+Its application outcome is unknown.
+Do not report acceptance on that basis.
+Inspect the result instead of retrying automatically.
+Provider `submitted` means provider submission, not callback execution or site acceptance.
+
+Main-frame navigation or page/context closure immediately aborts a pending provider wait.
+The task can still have an unknown outcome and a charge.
+Do not treat cancellation as evidence that the task was free or retry it automatically.
 
 ## Qualification
 
-Run `node --test tests/integration/browser_2captcha.test.mjs tests/integration/browser_captcha_catalog.test.mjs tests/integration/browser_captcha_adapters.test.mjs tests/integration/browser_captcha_mcp.test.mjs tests/integration/browser_challenge.test.mjs tests/integration/browser_budget.test.mjs`.
+Run from the repository root:
 
-The tests use synthetic data and a loopback provider transport, never the real API key or a paid solve. They cover all 64 canonical types, both documented aliases, additional conditional variants, automatic standalone reCAPTCHA/Turnstile, configured typed adapters, authenticated upstream proxy selection in an installed MCP process, proxy-disclosure refusal, no proxyless fallback, durable receipts, stale callbacks, denial, and redaction. Live qualification requires a separately approved controlled site, explicit paid authorization and limits, a trustworthy site acceptance signal, and successful receipt reconciliation. Do not use artificial Google traffic or YouTube view generation as a CAPTCHA integration test.
+```sh
+node --test tests/integration/browser_2captcha.test.mjs tests/integration/browser_captcha_catalog.test.mjs tests/integration/browser_captcha_adapters.test.mjs tests/integration/browser_captcha_mcp.test.mjs tests/integration/browser_challenge.test.mjs tests/integration/browser_budget.test.mjs
+```
+
+These tests use synthetic data and a loopback provider transport, without a real API key or paid solve.
+Coverage includes:
+
+- All 64 canonical types and both documented aliases.
+- Additional conditional variants.
+- Automatic standalone reCAPTCHA and Turnstile.
+- Configured typed adapters.
+- Authenticated upstream proxy selection in an installed MCP process.
+- Disclosure refusal and no proxyless fallback.
+- Durable receipts, stale callbacks, denial, and redaction.
+
+Live qualification requires a separately approved controlled site.
+It also requires explicit paid authorization and limits, a trustworthy acceptance signal, and successful receipt reconciliation.

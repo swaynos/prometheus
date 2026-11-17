@@ -379,7 +379,7 @@ test("round-robin allocation, wraparound, reorder, removal, endpoint change, cor
     assert.doesNotMatch(textView, /endpointFingerprint|createdAt|rotatedAt|18001|19999/);
   }
 
-  // Concurrent multi-process allocation produces exact unique round-robin picks with no lost cursor updates.
+  // Six concurrent allocations traverse the three-member pool twice without losing cursor updates.
   const concDir = makeConfigDir(t);
   writeBrowserSettings(concDir, { channel: "default", proxy: { session: "base", strategy: "round-robin", pool } });
   const cliPath = path.join(repoRoot, "scripts/browser-sessions.mjs");

@@ -1,80 +1,194 @@
-# Browser Proxy Pool Specification
+# Browser proxy pool specification
 
-**Status:** Implemented (macOS Playwright Chromium and installed Google Chrome qualified locally; Linux headless and Xvfb virtual-display remain unverified until the qualification workflow has run successfully on a Linux host).
-
-**Associated design:** [Browser Proxy Low-Level Design](BROWSER-PROXY-LLD.md).
+**Design:** [Proxy low-level design](BROWSER-PROXY-LLD.md).
 
 ## 1. Purpose
 
-Allow the managed Prometheus Browser to use a user-configured pool of proxies. A named browser session receives one proxy in round-robin order and retains it across browser closures, runtime restarts, and extended inactivity. Login, subsequent browsing, and supported browser-mediated transfers use that same assignment.
+The managed Prometheus browser must support a user-configured proxy pool.
+Round-robin selection assigns one proxy to each named session.
+The session retains that assignment across browser closure, runtime restart, and extended inactivity.
+Login, later task browsing, and supported browser-mediated transfers use the same assignment.
 
-Existing browser tools, authentication safeguards, file-transfer validation, and non-proxy behavior remain in force.
+Existing tools, authentication safeguards, transfer validation, and direct-routing behavior remain in force.
 
-## 2. Scope and terminology
+## 2. Scope and terms
 
-- **Proxy pool:** An ordered list of uniquely identified proxy identities loaded from `<config_dir>/proxies.txt` by default, or an explicitly configured legacy JSON pool.
-- **Browser session:** A persistent, user-named routing identity; it is not an OpenCode conversation, browser process, tab, or login record.
-- **Generation:** A version of a browser session's proxy assignment. Explicit rotation starts a new generation.
-- **Authentication record:** Existing private, origin-scoped saved login state. It is separate from the browser session and must be explicitly associated with a proxy-enabled session.
-- **Assignment:** The proxy ID and endpoint identity pinned to a particular session generation.
+| Term | Meaning |
+| --- | --- |
+| Proxy pool | Ordered proxy identities from default `<config_dir>/proxies.txt` or an explicit legacy JSON pool |
+| Proxy session | Persistent named route. Interfaces also call it a browser session. It is not a conversation, process, tab, or login record. |
+| Generation | Version of a session assignment. Explicit rotation starts a new generation. |
+| Authentication record | Private saved login state for approved origins. Association with a proxy session is explicit. |
+| Assignment | Proxy ID and endpoint identity pinned to one session generation |
 
-Initial protocol support is HTTP proxies, with optional username/password authentication, including HTTPS destinations via HTTP CONNECT. HTTPS-to-proxy transport and SOCKS5 are out of scope until separately qualified. Proxying is optional globally, but mandatory for a session configured to use a proxy.
+Initial support covers HTTP proxies, with optional username/password authentication.
+HTTPS destinations use HTTP CONNECT.
+HTTPS-to-proxy transport and SOCKS5 require separate qualification and remain outside scope.
+Proxy support is optional, but routing through the assigned proxy is mandatory for every configured proxy session.
 
 ## 3. Functional requirements
 
 ### 3.1 Pool and selection
 
-1. The primary input is `<config_dir>/proxies.txt` (normally `~/.config/opencode/proxies.txt`), one `HOST:PORT:USER:PASS` record per line. No `poolFile`, separate secrets directory, or per-proxy JSON credential files are required. Configure `proxy.session` and `strategy: "round-robin"` explicitly; omitting `pool` selects the file. An explicit legacy JSON `pool` remains supported and takes precedence without reading the default file. Omitting `proxy` leaves existing non-proxy behavior unchanged.
-2. Creating a browser session atomically assigns the next pool member and advances the persistent cursor. For `[A, B, C]`, successive allocations are A, B, C, A.
-3. Allocation is reserved even if a subsequent browser launch fails. Concurrent allocations must not lose or duplicate cursor updates, although wraparound can intentionally assign the same proxy to different sessions.
-4. Reopening a session reuses its assignment; browser closure, process restarts, elapsed time, tabs, requests, navigation, and login do not advance the cursor.
-5. Only explicit session creation or rotation advances the cursor. Rotation consumes the shared global cursor and creates a new generation; it is refused while the session has an active owner or login helper. Other allocations can bring the cursor back to that session's current proxy, and a single-member pool always selects the same proxy. Rotation does not guarantee a different endpoint or exit IP, even though generation and authentication-reset rules still apply.
-6. File-backed IDs are stable across reordering and password updates and distinguish different usernames on the same canonical endpoint. Removing the assigned proxy or changing host, port, or username makes the session unavailable until explicit reconciliation or rotation. Password replacement is allowed on the next launch without rotation. Legacy IDs and credential-update behavior remain compatible. Switching from hand-written JSON IDs to generated file IDs requires explicit inactive-session/cursor reconciliation, not an automatic registry rewrite.
-7. No operation silently skips an unhealthy proxy or falls back to a direct connection.
-8. Text parsing accepts UTF-8 with optional initial BOM, LF/CRLF, blank lines, full-line `#` comments, hostnames, IPv4, bracketed IPv6, and literal colons in the password. Credentials are not trimmed or URL-decoded. Reject malformed/empty records, control characters, invalid ports, duplicate canonical endpoint/username identities, invalid UTF-8, empty lists, files over 1 MiB, and more than 4096 entries. Diagnostics may identify line numbers but never include record contents.
+1. The primary input is `<config_dir>/proxies.txt`, normally `~/.config/opencode/proxies.txt`.
+   Each line contains `HOST:PORT:USER:PASS`.
+   The primary format must work without `poolFile`, a separate secrets directory, or individual credential JSON files.
+   Require explicit `proxy.session` and `strategy: "round-robin"`.
+   Without `pool`, select the text file.
+   An explicit legacy JSON `pool` takes priority without reading the text file.
+   Without `proxy`, retain existing direct-routing behavior.
+2. Session creation must atomically assign the next member and advance the persistent cursor.
+   For `[A, B, C]`, allocations follow A, B, C, A.
+3. A failed later browser launch must not release that allocation.
+   Concurrent allocations must not lose or duplicate cursor updates.
+   Pool wraparound can intentionally assign one proxy to different sessions.
+4. Reopening must reuse the assignment.
+   Closure, restarts, elapsed time, tabs, requests, navigation, and login must not advance the cursor.
+5. Advance the cursor only for explicit creation or rotation.
+   Rotation consumes the shared global cursor and increments generation.
+   Reject rotation while the session has an active owner or login helper.
+   Other allocations can return the cursor to the session's current proxy.
+   A single-member pool always selects the same proxy.
+   Rotation must still apply generation and authentication-reset rules.
+   It does not guarantee a different endpoint or exit IP.
+6. Text-backed IDs must survive reordering and password changes.
+   Different usernames on one canonical endpoint must have different identities.
+   Removed identities or changed hosts, ports, or usernames must block the affected session until explicit reconciliation or rotation.
+   Password replacement must apply at the next launch without rotation.
+   Retain legacy ID and credential-update compatibility.
+   Migration from handwritten JSON IDs requires explicit inactive-session and cursor reconciliation.
+   Do not rewrite the registry automatically.
+7. Operations must not silently skip an unhealthy proxy or use a direct connection instead.
+8. The parser must accept:
+   - Strict UTF-8 and optional initial BOM.
+   - LF/CRLF, blank lines, and full-line `#` comments.
+   - Hostnames, IPv4, and bracketed IPv6.
+   - Literal colons in passwords.
+   It must not trim or URL-decode credentials.
+   It must reject malformed or empty records, control characters, invalid ports, duplicate identities, invalid UTF-8, and empty lists.
+   Reject files above 1 MiB or 4096 entries.
+   Diagnostics may identify line numbers, never record contents.
 
 ### 3.2 Session and authentication lifecycle
 
-1. A proxy-enabled task browser selects a named session before starting. The selected generation remains fixed for its lifetime.
-2. A login helper joins the task session via an explicit handoff and uses the same assignment. It does not consume another proxy.
-3. Saved authentication and proxy assignments remain separate. Proxy-enabled sessions restore only explicitly associated authentication records, and only for their approved origins; all existing origin and verification safeguards apply.
-4. Rotation does not automatically carry authentication associations into the new generation. Reconciliation that changes the proxy ID or endpoint also clears associations by default. An explicit retention option may carry the associations, with a warning that the changed route may require renewed verification. Rotation and reconciliation never delete or rewrite saved cookies.
-5. Existing saved records are preserved. Enabling proxies requires explicit association before those records can be restored in a proxy-enabled session.
-6. Closing a browser releases runtime resources but neither deletes a session nor rotates its proxy.
+1. Before startup, a proxy-enabled task browser must select a named session.
+   Its generation remains fixed for that browser's lifetime.
+2. A login helper must join through an explicit handoff.
+   It must use the task assignment without allocating another proxy.
+3. Saved authentication and proxy assignments must remain separate.
+   Restore only explicitly associated records for the selected generation and approved origins.
+   Retain all existing origin and verification safeguards.
+4. Rotation must clear authentication associations by default.
+   Changed-ID or changed-endpoint reconciliation must do the same.
+   An explicit retention option may preserve associations.
+   It must warn that the changed route can require renewed verification.
+   Rotation and reconciliation must not delete or rewrite saved cookies.
+5. Enabling proxies must preserve existing saved records.
+   Restoration into a proxy session requires explicit association.
+6. Browser closure must release runtime resources without deleting the session or rotating the proxy.
 
 ### 3.3 Routing and safety
 
-1. The selected proxy is used for supported managed task browsers, login windows, tabs, frames, popups, and browser-mediated transfers. Every transfer implementation must be audited; a path that cannot honor the route must fail rather than bypass it.
-2. Proxy-enabled automatic login must not use the existing CDP shortcut unless its routing is qualified. Initial support uses a managed launch. Proxy configuration with external CDP is rejected.
-3. Proxy credentials, endpoints, and sensitive connection details must not appear in public status, logs, errors, generated probes, or model-facing output. Status may show the session, generation, proxy ID, and that routing is configured; it must not claim proof of the public exit IP.
-4. On proxy connection failure or HTTP 407, report the failure and retain the assignment. On target 401/403 or challenge, preserve existing access-denial rules. Do not rotate to bypass denial.
-5. An interrupted non-idempotent action has an unknown outcome: inspect before any retry. Do not automatically replay actions, change route, or weaken TLS verification.
-6. Do not contact a public IP-check service automatically. Any external verification endpoint requires explicit approval.
+1. Supported managed task browsers, login windows, tabs, frames, popups, and browser-mediated transfers must use the selected proxy.
+   Audit every transfer implementation.
+   If a path cannot honor the route, it must fail instead of bypassing the proxy.
+2. Proxy-enabled automatic login must not use the CDP shortcut without separate routing qualification.
+   Initial support uses a managed launch.
+   Reject proxy configuration with external CDP.
+3. Public status, logs, errors, probes, and model-facing output must omit credentials, endpoints, and sensitive connection details.
+   Status may show session, generation, proxy ID, and configured routing.
+   It must not claim verified public exit IP.
+4. On connection failure or HTTP 407, report proxy failure and retain the assignment.
+   On target HTTP 401/403 or challenge, apply existing denial rules.
+   Do not rotate to bypass denial.
+5. After an interrupted non-idempotent action, mark the outcome unknown.
+   Inspect before any retry.
+   Do not automatically replay actions, change routes, or weaken TLS verification.
+6. Do not contact public IP-check services automatically.
+   External verification endpoints require explicit approval.
 
 ## 4. Interface and operations
 
-Provide explicit commands to create, list, inspect, and rotate named browser sessions and to bind authentication records. Commands display only sanitized metadata. A session is selected by configuration; changes to that selection do not mutate a running browser.
+Provide explicit commands for creation, listing, inspection, rotation, and authentication association.
+Return sanitized metadata only.
+Configuration selects the session.
+Changes to selection must not alter an active browser.
 
-Provide a read-only `doctor` command for local registry, pool-assignment, credential-safety, lock, and ownership checks. This explicitly requested diagnostic may read and validate proxy credential files privately, but never returns their contents or paths. It does not read saved authentication state, acquire locks, create files, prune dead owners, repair state, launch browsers, or contact endpoints. Return fixed diagnostic codes and exit nonzero on detected errors. Results are a point-in-time local snapshot, not connectivity, exit-IP, or browser-readiness verification.
+### Read-only diagnostics
 
-The registry and credentials live outside repositories in owner-only storage. The default text list must be a single-link, non-symlink regular file owned by the current user with exact mode `0600`. The configuration root need not be `0700`: owner-controlled `0755` is supported, with trusted, non-group/world-writable real directories (root-owned sticky temporary ancestors are permitted). Validate open descriptors and recheck directory/file identities and metadata after a bounded read. Reject platforms unable to enforce these properties. Legacy credential-directory permissions remain unchanged. Rotation state survives restarts and is updated atomically with bounded concurrency control. Unsafe files, invalid configuration, corrupt state, and ambiguous ownership stop the operation; none authorize direct routing or silent recovery.
+Provide a local `doctor` command for registry, assignment, credential safety, lock, and ownership checks.
+It may validate proxy credential files privately, but must not return their contents or paths.
+It must not:
 
-Installer probes, static configuration validation, status, and list commands do not open the proxy list, allocate a session, or advance rotation. Session lifecycle operations and generation checks resolve the list privately; read-only `doctor` explicitly validates it without network requests or repairs. Credentials must not be inserted into serializable config, IPC options, registries, probes, receipts, or reports. Installation and deployment are separate from implementation; stop active browser tasks and login helpers before staged deployment and reconnect the browser MCP.
+- Read saved authentication values.
+- Acquire locks or create files.
+- Prune owners or repair state.
+- Launch browsers or contact endpoints.
+
+Return fixed codes and a nonzero exit status for detected errors.
+Results describe a local snapshot, not verified connectivity, exit IP, or browser readiness.
+
+### Storage and file safety
+
+Registry and credentials must remain outside repositories in owner-only storage.
+The default text list must be current-user-owned, regular, single-link, and not a symlink.
+Require exact file mode `0600`.
+The configuration root can have owner-controlled mode `0755`.
+Require real ancestor directories with trusted ownership and no untrusted write access.
+Permit root-owned sticky temporary ancestors.
+
+Validate open descriptors.
+After a bounded read, verify file and directory identities and metadata again.
+Reject platforms that cannot enforce these properties.
+Retain existing legacy credential-directory permission rules.
+
+Rotation state must survive restart through atomic updates and bounded concurrency control.
+Unsafe files, invalid configuration, corrupt state, or ambiguous ownership must stop the operation.
+They do not authorize direct routing or silent recovery.
+
+### Installation and static inspection
+
+Installer probes, static validation, status, and list commands must not open the proxy list or allocate a session.
+They must not advance rotation.
+Lifecycle operations and generation checks resolve the list privately.
+Explicit `doctor` validates it without network requests or repairs.
+
+Never insert credentials into serializable configuration, IPC options, registries, probes, receipts, or reports.
+Implementation is separate from deployment.
+Before staged deployment, stop affected tasks and login helpers.
+Reconnect the browser MCP afterward.
 
 ## 5. Acceptance criteria
 
-- A session can log in, close, reopen days later, and browse through the same configured proxy assignment.
-- New sessions follow round-robin order across restarts and concurrent allocation; explicit rotation advances once and changes generation.
-- Proxy failure cannot cause a direct connection, automatic proxy switch, or replay of a submission within supported paths.
-- Login and task browsing use the same generation; unassociated saved authentication is not restored.
-- Credentials do not appear in model-facing output, errors, logs, or installer probes.
-- Existing non-proxy workflows and their tests continue to pass.
-- Controlled fixtures verify browser routing, authentication, CONNECT, transfers, failure handling, and staged installation. Linux and macOS qualification is reported separately; unavailable configurations are unverified, not passing.
-- Diagnostics leave file contents, permissions, ownership records, and the cursor unchanged, including with stale, unsafe, or corrupt state. Same-proxy and single-member rotations still increment generation and apply authentication-reset rules.
-- A default `proxies.txt` list works end-to-end for task browsing, login handoffs, authenticated HTTP/CONNECT, transfers, reopen/restart persistence, and failure-without-fallback, without per-proxy JSON credential files. Parser/storage failures are sanitized, including line-number diagnostics. Existing JSON pools remain covered by the same routing fixtures.
+- Login, closure, and later reopening retain the same configured assignment, including after days of inactivity.
+- New sessions follow round-robin order across restart and concurrent allocation.
+- Explicit rotation advances once and increments generation.
+- Proxy failure cannot cause direct routing, automatic proxy switching, or submission replay on supported paths.
+- Login and task browsing use the same generation.
+- Unassociated saved authentication is not restored.
+- Credentials do not appear in public output, errors, logs, or probes.
+- Existing non-proxy workflows and tests continue to pass.
+- Controlled fixtures verify routing, authentication, CONNECT, transfers, failures, and staged installation.
+- Report Linux and macOS qualification separately. Unavailable configurations remain unverified.
+- Diagnostics preserve contents, permissions, owners, and cursor, including for stale, unsafe, or corrupt state.
+- Same-proxy and single-member rotations still increment generation and reset associations.
+- Default text lists support browsing, login, authenticated HTTP/CONNECT, transfers, reopen/restart persistence, and failure without fallback.
+- Text-list operation needs no individual credential JSON files.
+- Parser and storage errors remain sanitized, including line-number diagnostics.
+- Legacy JSON pools retain the same routing-fixture coverage.
 
 ## 6. Limits and non-goals
 
-This is not an OS-wide network sandbox or a guarantee about every DNS, WebRTC, extension, or browser networking surface. A configured endpoint does not guarantee a stable public IP: a provider can rotate exits or expire sticky sessions. Document known engine-specific limitations and do not claim leak-proof routing.
+Proxy routing is not an OS-wide network sandbox and does not contain every DNS, WebRTC, extension, or browser network path.
+A configured endpoint does not guarantee a stable public IP.
+Providers can rotate exits or expire sticky sessions.
+Document engine limits. Do not claim leak-proof routing.
 
-Timed or per-request rotation, health-based failover, geographic selection, provider APIs, fingerprint changes, public IP checks, external-CDP proxy support, SOCKS5, and HTTPS proxy transport are out of scope for the initial release.
+Initial scope excludes:
+
+- Timed or per-request rotation.
+- Health-based failover.
+- Geographic selection and provider APIs.
+- Fingerprint changes and public IP checks.
+- External-CDP proxy support.
+- SOCKS5 and HTTPS-to-proxy transport.

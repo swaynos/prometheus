@@ -63,7 +63,7 @@ test('fresh install owns only its runtime, V2 registration, rule, and human-invo
   assert.match(value.commands.browser.template, /\$ARGUMENTS/);
   assert.deepEqual(value.instructions, [path.join(f.runtime, 'rules/resource-selection.md')]);
   assert.match(fs.readFileSync(value.instructions[0], 'utf8'), /read `\.\.\/docs\/RESOURCE-SELECTION.md`/);
-  assert.match(fs.readFileSync(path.join(f.runtime, 'docs/RESOURCE-SELECTION.md'), 'utf8'), /^# Managed Browser Reference/);
+  assert.match(fs.readFileSync(path.join(f.runtime, 'docs/RESOURCE-SELECTION.md'), 'utf8'), /^# Managed browser reference/);
   assert.match(fs.readFileSync(path.join(f.runtime, 'docs/RESOURCE-SELECTION.md'), 'utf8'), /prometheus-browser\/opencode-browser-login\.mjs/);
   assert.equal(fs.existsSync(path.join(f.runtime, 'docs/BROWSER-OPERATIONS.md')), true);
   assert.equal(fs.readFileSync(path.join(f.runtime, '.env.example'), 'utf8'), 'TWOCAPTCHA_API_KEY=\n');

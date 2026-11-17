@@ -1,4 +1,4 @@
-# Example only. Store real credentials in ~/.config/opencode/proxies.txt (0600).
-# HOST:PORT:USER:PASS — one authenticated HTTP proxy per line.
+# Placeholders only. Store real credentials in ~/.config/opencode/proxies.txt with mode 0600.
+# Use one authenticated HTTP proxy per line: HOST:PORT:USER:PASS.
 proxy-a.example:8000:YOUR_USERNAME:YOUR_PASSWORD
 proxy-b.example:8000:YOUR_OTHER_USERNAME:YOUR_OTHER_PASSWORD

@@ -1,7 +1,7 @@
 {
   "name": "opencode-prometheus",
   "version": "0.2.0",
-  "description": "Native OpenCode V2 investigation, decisions, and independent verification.",
+  "description": "Investigate, record decisions, and verify candidates independently with native OpenCode V2 tools.",
   "type": "module",
   "private": true,
   "license": "GPL-3.0-only",

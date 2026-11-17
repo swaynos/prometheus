@@ -7,7 +7,7 @@ const repo = path.resolve(import.meta.dirname, "../..");
 const load = async file => (await readFile(path.join(repo, file), "utf8"))
   .toLowerCase().replace(/\s+/g, " ");
 
-test("rule selects user, project, then managed workflow without forcing its procedures", async () => {
+test("the rule selects user, project, then managed workflow without forcing managed procedures", async () => {
   const text = await load("rules/resource-selection.md");
   let previous = -1;
   for (const step of ["explicit user direction", "project-local browser instructions", "managed `prometheus-browser` defaults"]) {
@@ -26,8 +26,8 @@ test("browser tool procedures apply in user/project-selected workflows", async (
   assert.match(rule, /when using `prometheus-browser`, read `\.\.\/docs\/resource-selection\.md` relative to this rule before browser actions/);
   assert.match(rule, /follow its relevant tool procedures even in user\/project-selected workflows/);
   const reference = await load("docs/RESOURCE-SELECTION.md");
-  assert.match(reference, /relevant tool procedures.*before using `prometheus-browser`, including in user\/project-selected workflows/);
-  assert.match(reference, /apply the managed mode and login procedures only when.*default managed workflow/);
+  assert.match(reference, /before using `prometheus-browser`, read the relevant tool procedures here\. this requirement also applies in user\/project-selected workflows/);
+  assert.match(reference, /apply managed mode and login procedures only when the policy selects the default managed workflow/);
   assert.doesNotMatch(reference, /read this reference only when/);
 });
 
@@ -46,7 +46,7 @@ test("compact rule retains shared safeguards", async () => {
 test("managed reference retains login, state, transfer, and failure procedures", async () => {
   const text = await load("docs/RESOURCE-SELECTION.md");
   for (const clause of [
-    "headless", "virtual-display", "headed human-login", "do not complete the task in the login window",
+    "headless", "virtual-display", "separate headed login window, not the task browser", "do not complete the task in the login window",
     "opencode-browser-login.mjs", "after the user's reply", "do not poll",
     "mode-0600", "existing approved-origin tabs", "state values never enter model context",
     "browser_upload_image", "browser_download", "browser_save_media",
@@ -59,4 +59,31 @@ test("rule is bounded and does not restore retired workflows", async () => {
   const text = await load("rules/resource-selection.md");
   assert.ok(text.split(/\s+/).length <= 400, "always-loaded rule exceeded its context budget");
   assert.doesNotMatch(text, /prometheus_browser_fallback|playwright-image-generation/);
+});
+
+test("rewritten procedures retain paid authorization, unknown outcomes, and human-control limits", async () => {
+  const captcha = await load("docs/BROWSER-2CAPTCHA.md");
+  for (const clause of [
+    "every solve also requires explicit paid authorization and limits",
+    "navigation never starts a solve",
+    "an actual charge can exceed the estimate and configured caps",
+    "an unknown actual charge blocks every new reservation",
+    "never discard unknown commitments to make capacity available",
+    "do not guess zero",
+    "stop on managed/full-page access denial",
+    "it does not fall back",
+    "navigation invalidates the solve",
+    "these tests do not qualify live paid solves",
+  ]) assert.ok(captcha.includes(clause), `missing CAPTCHA restriction: ${clause}`);
+  const shopping = await load("docs/BROWSER-SHOPPING-WORKFLOW.md");
+  for (const clause of [
+    "never automate checkout, payment, or order placement",
+    "cart approval does not authorize checkout",
+    "do not replay the action",
+    "a retry requires a new explicit decision and authorization",
+    "during takeover, do not record, poll, or automate",
+    "only after explicit user confirmation",
+    "before other actions, call `browser_snapshot` on the original page",
+    "no real storefront cart or checkout has been qualified",
+  ]) assert.ok(shopping.includes(clause), `missing shopping restriction: ${clause}`);
 });

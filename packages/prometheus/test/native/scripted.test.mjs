@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isolated, tool, promptText, until } from './helpers.mjs';
 
-test('spike uses native shell on Linux and preserves normal editing tools', { timeout: 90000 }, async t => {
+test('spike uses native shell and preserves normal editing tools', { timeout: 90000 }, async t => {
   let step = 0;
   const h = await isolated(t, { handler: input => {
     if (step++ === 0) {

@@ -88,7 +88,7 @@ test("challenge inspection is redacted and solving is fail-closed", async () => 
     assert.equal(JSON.parse(c.textOf(await c.call("browser_challenge_inspect"))).status, "unsupported");
     await c.call("browser_navigate", { url: `${base}/challenge-ok` });
     assert.equal(JSON.parse(c.textOf(await c.call("browser_challenge_inspect"))).status, "unsupported");
-  } finally { await c.call("browser_close"); c.close(); await new Promise(resolve => httpServer.close(resolve)); }
+  } finally { await closeFixture(httpServer, c); }
 });
 
 test("configured provider still rejects without durable budget and hides key path", async () => {
@@ -99,8 +99,16 @@ test("configured provider still rejects without durable budget and hides key pat
     const result = c.textOf(await c.call("browser_challenge_solve", { authorize_paid: true, max_cost_usd: 1, max_tasks: 1 }));
     assert.deepEqual(JSON.parse(result), { status: "not_submitted", reason: "budget_enforcement_unavailable" });
     assert.doesNotMatch(c.textOf(await c.call("browser_status")), /secret-key-location/);
-  } finally { c.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { try { await c.close(); } finally { await rm(root, { recursive: true, force: true }); } }
 });
+
+async function closeFixture(server, ...clients) {
+  const results = await Promise.allSettled(clients.map(client => client.close()));
+  server.closeAllConnections();
+  await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  const failures = results.filter(result => result.status === "rejected").map(result => result.reason);
+  if (failures.length) throw new AggregateError(failures, "MCP fixture shutdown failed");
+}
 
 async function stateConfig(base, selector) {
   const root = await mkdtemp(path.join(os.tmpdir(), "cuddly-browser-state-"));
@@ -147,7 +155,7 @@ for (const channel of channels) {
       } else {
         assert.equal(evidence.browserInstall, null);
       }
-    } finally { await c.call("browser_close"); c.close(); await new Promise((resolve) => httpServer.close(resolve)); }
+    } finally { await closeFixture(httpServer, c); }
   });
 }
 
@@ -164,7 +172,7 @@ test("a missing bundled browser shows in status and stops navigation with its in
     assert.equal(result.isError, true);
     assert.match(c.textOf(result), /Playwright browser not installed: chromium-headless-shell \d+\. Run: .*cli\.js install chromium-headless-shell/);
     assert.equal(JSON.parse(c.textOf(await c.call("browser_status"))).contextOpen, false);
-  } finally { await c.close(); await rm(empty, { recursive: true, force: true }); }
+  } finally { try { await c.close(); } finally { await rm(empty, { recursive: true, force: true }); } }
 });
 
 test("missing and foreign-origin saved records do not crash hydration", async () => {
@@ -176,7 +184,7 @@ test("missing and foreign-origin saved records do not crash hydration", async ()
     assert.equal(result.isError, undefined, c.textOf(result));
     const status = JSON.parse(c.textOf(await c.call("browser_status")));
     assert.equal(status.hydratedAuthentication, false);
-  } finally { await c.call("browser_close"); c.close(); await new Promise((resolve) => httpServer.close(resolve)); await rm(root, { recursive: true, force: true }); }
+  } finally { try { await closeFixture(httpServer, c); } finally { await rm(root, { recursive: true, force: true }); } }
 });
 
 test("Playwright MCP server drives a headless page over JSON-RPC", async () => {
@@ -246,8 +254,7 @@ test("Playwright MCP server drives a headless page over JSON-RPC", async () => {
     const closed = c.textOf(await c.call("browser_close", {}));
     assert.match(closed, /browser closed/);
   } finally {
-    c.close();
-    httpServer.close();
+    await closeFixture(httpServer, c);
   }
 });
 
@@ -268,8 +275,7 @@ test("an oversized wait is bounded and leaves the page usable", async () => {
     const recovered = c.textOf(await c.call("browser_snapshot", {}));
     assert.match(recovered, /ready-now/, "the browser context survived the wait timeout");
   } finally {
-    c.close();
-    httpServer.close();
+    await closeFixture(httpServer, c);
   }
 });
 
@@ -290,8 +296,7 @@ test("explicit navigation recovers a closed page and classifies access denial", 
     assert.match(denied, /status 403/);
     assert.match(denied, /access denied/);
   } finally {
-    c.close();
-    httpServer.close();
+    await closeFixture(httpServer, c);
   }
 });
 
@@ -304,8 +309,7 @@ test("Cloudflare challenges are identified without misreporting authentication f
     assert.match(challenged, /Cloudflare challenge detected/);
     assert.match(challenged, /do not retry automatically/);
   } finally {
-    c.close();
-    httpServer.close();
+    await closeFixture(httpServer, c);
   }
 });
 
@@ -325,11 +329,10 @@ test("saved state is authenticated only when its account selector is visible", a
     assert.equal(rejected.isError, true);
     assert.match(invalid.textOf(rejected), /visible account evidence.*new login/i);
   } finally {
-    valid.close();
-    invalid.close();
-    httpServer.close();
-    await rm(validRoot, { recursive: true, force: true });
-    await rm(invalidRoot, { recursive: true, force: true });
+    try { await closeFixture(httpServer, valid, invalid); } finally {
+      await rm(validRoot, { recursive: true, force: true });
+      await rm(invalidRoot, { recursive: true, force: true });
+    }
   }
 });
 
@@ -355,8 +358,7 @@ test("unknown tool and bad args return isError, not a crash", async () => {
 
     await c.call("browser_close", {});
   } finally {
-    c.close();
-    httpServer.close();
+    await closeFixture(httpServer, c);
   }
 });
 
@@ -374,7 +376,7 @@ test("user-confirmed capture loads for inspection without claiming task-browser 
     assert.match(c.textOf(await c.call("browser_snapshot", {})), /Signed in account/);
     assert.equal((await c.call("browser_evaluate", { expression: "document.cookie" })).isError, true);
     await c.call("browser_close", {});
-  } finally { c.close(); httpServer.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { try { await closeFixture(httpServer, c); } finally { await rm(root, { recursive: true, force: true }); } }
 });
 
 test("configured context options reach the page and metadata does not start a browser", async () => {
@@ -396,7 +398,7 @@ test("configured context options reach the page and metadata does not start a br
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       dark: matchMedia('(prefers-color-scheme: dark)').matches, reduce: matchMedia('(prefers-reduced-motion: reduce)').matches})` })));
     assert.deepEqual(observed, { width: 1440, height: 900, scale: 2, screenHeight: 1000, language: "en-GB", timezone: "Europe/London", dark: true, reduce: true });
-  } finally { await c.call("browser_close"); c.close(); httpServer.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { try { await closeFixture(httpServer, c); } finally { await rm(root, { recursive: true, force: true }); } }
 });
 
 test("profile metadata and emulation survive the full MCP lifecycle", async () => {
@@ -425,7 +427,7 @@ test("profile metadata and emulation survive the full MCP lifecycle", async () =
     assert.equal(closed.contextOpen, false);
     assert.equal(closed.profile.id, before.profile.id);
     assert.equal(closed.browserVersion, null);
-  } finally { await c.call("browser_close"); c.close(); httpServer.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { try { await closeFixture(httpServer, c); } finally { await rm(root, { recursive: true, force: true }); } }
 });
 
 test("navigation waits for an explicit application signal and preserves the page on timeout", async () => {
@@ -442,7 +444,7 @@ test("navigation waits for an explicit application signal and preserves the page
     for (const options of [{ wait_until: "bad" }, { wait_until: null }, { ready_selector: "" }, { timeout: -1 }]) {
       assert.equal((await c.call("browser_navigate", { url: base, ...options })).isError, true);
     }
-  } finally { await c.call("browser_close"); c.close(); httpServer.close(); }
+  } finally { await closeFixture(httpServer, c); }
 });
 
 test("fixed typing delay spaces keyboard events without changing fill or default typing", async () => {
@@ -463,7 +465,7 @@ test("fixed typing delay spaces keyboard events without changing fill or default
       assert.equal((await c.call("browser_type", { selector: "#name", text: "not typed", delay_ms })).isError, true);
     }
     assert.equal(c.textOf(await c.call("browser_evaluate", { expression: "document.querySelector('#name').value" })), "Abcd");
-  } finally { await c.call("browser_close"); c.close(); httpServer.close(); }
+  } finally { await closeFixture(httpServer, c); }
 });
 
 test("HTTP 200 challenges are classified without matching ordinary documentation", async () => {
@@ -476,7 +478,7 @@ test("HTTP 200 challenges are classified without matching ordinary documentation
     const normal = c.textOf(await c.call("browser_navigate", { url: `${base}/cloudflare-docs` }));
     assert.match(normal, /status 200/);
     assert.doesNotMatch(normal, /challenge detected|access denied/);
-  } finally { await c.call("browser_close"); c.close(); httpServer.close(); }
+  } finally { await closeFixture(httpServer, c); }
 });
 
 test("denial is reported before saved-account verification or readiness waiting", async () => {
@@ -490,7 +492,7 @@ test("denial is reported before saved-account verification or readiness waiting"
     assert.doesNotMatch(c.textOf(denied), /new login|readiness wait expired/);
     const status = JSON.parse(c.textOf(await c.call("browser_status")));
     assert.equal(status.hydratedAuthentication, false);
-  } finally { await c.call("browser_close"); c.close(); httpServer.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { try { await closeFixture(httpServer, c); } finally { await rm(root, { recursive: true, force: true }); } }
 });
 
 test("Playwright MCP server runs with external Chrome and CDP attachment", async () => {
@@ -508,9 +510,7 @@ test("Playwright MCP server runs with external Chrome and CDP attachment", async
     assert.equal(status.configuredDistribution, "external-chrome-cdp");
     assert.equal(status.mode, "external-cdp");
   } finally {
-    await c.call("browser_close");
-    c.close();
-    httpServer.close();
+    await closeFixture(httpServer, c);
   }
 });
 
@@ -547,9 +547,7 @@ test("simulated human behavior provides typing jitter, curved mouse tracking, an
     assert.ok(typeof lastMouse.x === "number" && lastMouse.x > 0, `expected recorded mouse x, got ${lastMouse.x}`);
     assert.ok(typeof lastMouse.y === "number" && lastMouse.y > 0, `expected recorded mouse y, got ${lastMouse.y}`);
   } finally {
-    await c.call("browser_close");
-    c.close();
-    httpServer.close();
+    await closeFixture(httpServer, c);
   }
 });
 
@@ -570,9 +568,7 @@ test("human typing expires within its transport-safe budget and releases queued 
       expression: "document.querySelector('#name').value",
     })), partial, "input stays unchanged after the deadline");
   } finally {
-    await c.call("browser_close");
-    c.close();
-    httpServer.close();
+    await closeFixture(httpServer, c);
   }
 });
 
@@ -592,9 +588,7 @@ test("PROMETHEUS_BROWSER_HUMANIZE env var enables human behavior by default", as
     const out = c.textOf(await c.call("browser_evaluate", { expression: "document.querySelector('#out').textContent" }));
     assert.equal(out, "clicked!");
   } finally {
-    await c.call("browser_close");
-    c.close();
-    httpServer.close();
+    await closeFixture(httpServer, c);
   }
 });
 
@@ -609,7 +603,7 @@ test("MCP humanize startup uses resolved settings instead of reading the environ
         const status = JSON.parse(c.textOf(await c.call("browser_status")));
         assert.equal(status.humanize, Boolean(humanize));
         assert.equal(status.contextOpen, false);
-      } finally { c.close(); }
+      } finally { await c.close(); }
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -647,8 +641,6 @@ test("browser_configure tool dynamically toggles humanize across subsequent acti
     const offStatus = JSON.parse(c.textOf(await c.call("browser_status")));
     assert.equal(offStatus.humanize, false);
   } finally {
-    await c.call("browser_close");
-    c.close();
-    httpServer.close();
+    await closeFixture(httpServer, c);
   }
 });
