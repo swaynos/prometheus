@@ -395,10 +395,16 @@ function getFreePort() {
   });
 }
 
-async function waitForCdp(endpoint, timeoutMs = 15000) {
+async function waitForCdp(endpoint, timeoutMs = 15000, child = null) {
   const start = Date.now();
   const versionUrl = new URL("/json/version", endpoint).href;
+  let childError = null;
+  if (child) child.on("error", (err) => { childError = err; });
   while (Date.now() - start < timeoutMs) {
+    if (childError) throw childError;
+    if (child && child.exitCode !== null) {
+      throw new Error(`browser process exited prematurely with code ${child.exitCode}`);
+    }
     try { if ((await fetch(versionUrl)).ok) return; } catch {}
     await new Promise((r) => setTimeout(r, 50));
   }
@@ -495,8 +501,10 @@ export async function launchExternalCdpContext(chromium, selected, options = {})
     const execPath = resolveChromeExecutablePath(chromium, selected.channel);
     const headless = options.headless ?? selected.launchOptions?.headless ?? (selected.executionMode !== "virtual-display");
     const ua = selected.contextOptions?.userAgent;
+    const noSandbox = selected.launchOptions?.chromiumSandbox !== true;
     child = spawn(execPath, [
       ...(headless ? ["--headless=new"] : []),
+      ...(noSandbox ? ["--no-sandbox"] : []),
       "--remote-debugging-address=127.0.0.1",
       `--remote-debugging-port=${port}`,
       `--user-data-dir=${userDataDir}`,
@@ -506,7 +514,7 @@ export async function launchExternalCdpContext(chromium, selected, options = {})
       ...(ua ? [`--user-agent=${ua}`] : []),
       "about:blank",
     ], { stdio: "ignore" });
-    try { await waitForCdp(endpoint, cdp.timeout ?? 15000); }
+    try { await waitForCdp(endpoint, cdp.timeout ?? 15000, child); }
     catch (err) { cleanupProcess(); throw err; }
   }
 
