@@ -22,7 +22,7 @@ test('interrupted navigation uses only the current main-document response', asyn
     assert.match(c.textOf(auth), /access denied/i);
     const denied = await navigate('/interrupt-denied');
     assert.equal(denied.isError, true);
-    assert.match(c.textOf(denied), /access denied.*HTTP 403.*do not retry/i);
+    assert.match(c.textOf(denied), /access denied.*HTTP 403; retryable: (true|false)/i);
     const ok = await navigate('/interrupt-ok');
     assert.equal(ok.isError, true);
     assert.doesNotMatch(c.textOf(ok), /access denied/i);

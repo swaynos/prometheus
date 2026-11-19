@@ -241,8 +241,12 @@ test("the task launch applies context settings and closes the browser if context
   });
   const optOutConfig = { channel: "default", identityProfile: false, automationCompatibility: false, contextOptions: { locale: "en-GB" }, launchOptions: { slowMo: 0 } };
   assert.deepEqual(await createTaskContext(chromiumStub, optOutConfig), { browser, context });
-  assert.deepEqual(seen.context, { viewport: { width: 1280, height: 1024 }, locale: "en-GB" });
+  assert.equal(seen.context.locale, "en-GB");
+  assert.deepEqual(seen.context.viewport, { width: 1280, height: 1024 });
+  assert.match(seen.context.userAgent, /^Mozilla\/5\.0/);
+  assert.doesNotMatch(seen.context.userAgent, /HeadlessChrome/i);
   assert.deepEqual(seen.launch, { slowMo: 0, headless: true });
+  assert.throws(() => validateBrowserConfig({ channel: "default", contextOptions: { userAgent: "Mozilla/5.0 HeadlessChrome/120.0.0.0" } }), /HeadlessChrome/i);
   const firefoxStub = { launch: async () => browser };
   const ffRes = await createTaskContext(chromiumStub, { channel: "default", identityProfile: "pw-desktop-firefox" }, { firefox: firefoxStub });
   assert.equal(ffRes.runtime?.profile?.id, "pw-desktop-firefox");

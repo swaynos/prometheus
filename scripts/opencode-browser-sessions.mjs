@@ -1565,6 +1565,31 @@ function purgePendingSessionHandoffs(layout, sessionName) {
   }
 }
 
+export async function assertCanRotateSession(configDir, rawConfig, { session, allowOwnerId = null } = {}) {
+  const proxy = resolveProxyConfig(configDir, rawConfig?.proxy);
+  const targetSession = session ?? proxy.session;
+  try {
+    assertValidName(targetSession);
+  } catch {
+    throw new BrowserSessionError("invalid session name");
+  }
+
+  return await withRegistryLock(configDir, (layout) => {
+    const { exists, registry } = readRegistryStrict(layout.registryPath);
+    if (!exists || !registry.sessions[targetSession]) {
+      throw new BrowserSessionError(`proxy session '${targetSession}' not found`);
+    }
+    const { taskOwner } = inspectSessionOwners(layout, targetSession, {
+      failOnActiveTask: false,
+      failOnActiveHelper: true,
+    });
+    if (taskOwner && (!allowOwnerId || taskOwner.token !== allowOwnerId)) {
+      throw new BrowserSessionError(`session '${targetSession}' already has an active browser task owner`);
+    }
+    return { session: targetSession, generation: registry.sessions[targetSession].generation };
+  });
+}
+
 export async function rotateSession(configDir, rawConfig, { session, retainAssociations = false } = {}) {
   const proxy = resolveProxyConfig(configDir, rawConfig?.proxy);
   const targetSession = session ?? proxy.session;

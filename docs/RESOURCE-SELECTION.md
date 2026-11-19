@@ -18,17 +18,17 @@ The MCP server and login helper share `<config_dir>/prometheus-browser.json`, wh
 | --- | --- | --- |
 | `channel` | `"default"`, `"chromium"`, `"chrome"`, `"msedge"` | Required. `default` uses the headless shell in headless mode. `chrome` uses installed Google Chrome. |
 | `executionMode` | `"headless"`, `"headed"`, `"virtual-display"`, `"external-cdp"` (`"cdp"`) | Default: `headless`. Select `headed` explicitly before launch. Require a human-accessible graphical session. Linux virtual-display requires `xvfb-run` and `xauth`. |
-| `automationCompatibility` | Boolean | Chromium only. Omits `--enable-automation`, disables `AutomationControlled`, and removes `HeadlessChrome`. |
+| `automationCompatibility` | Boolean | Chromium only. Omits `--enable-automation` and disables `AutomationControlled`. (`HeadlessChrome` is always excluded from User-Agent strings regardless of this flag.) |
 | `humanize` | Boolean | Default: `false`. Simulates variable typing delays, curved mouse movement, and navigation delays. |
 | `profile` | Profile ID or `{ seed, engine?, os?, deviceClass?, orientation?, legacy? }` | Selects a catalog preset. Cannot combine with `identityProfile` or `external-cdp`. |
 | `identityProfile` | Boolean, `"random"`, or profile ID | Legacy JavaScript-only platform and WebGL override. |
 | `launchOptions` | `{ chromiumSandbox?: boolean, slowMo?: 0..1000, timeout?: 1..120000 }` | Explicit browser startup options. |
-| `contextOptions` | `{ viewport, screen, deviceScaleFactor, locale, timezoneId, colorScheme, reducedMotion, userAgent }` | Viewport and screen: `1..16384` pixels. Scale: `(0, 8]`. `screen` and `deviceScaleFactor` require a fixed `viewport`. |
+| `contextOptions` | `{ viewport, screen, deviceScaleFactor, locale, timezoneId, colorScheme, reducedMotion, userAgent }` | Viewport and screen: `1..16384` pixels. Scale: `(0, 8]`. `screen` and `deviceScaleFactor` require a fixed `viewport`. `userAgent` must never contain `HeadlessChrome`. |
 | `cdpOptions` | `{ port?: 0..65535, endpoint?: string, userDataDir?: string, timeout?: 1..120000 }` | Loopback remote debugging options for `external-cdp`. |
 | `proxy` | `{ session, strategy: "round-robin" }` | Optional. Uses the default text list unless an explicit legacy `pool` is present. Managed Chromium modes only. |
 | `captcha` | See [CAPTCHA guide](BROWSER-2CAPTCHA.md) | Optional. Disabled by default. Requires an origin policy and initialized private ledger. Never put the API key here. |
 
-Do not change settings or modes to retry an access denial.
+See [interruption and denial](#interruption-and-denial) for handling HTTP 401/403 and challenges.
 Linux virtual-display does not automatically provide a human-accessible desktop.
 
 ### Proxy settings
@@ -125,6 +125,7 @@ npm run browser:profiles -- sample campaign-001 --engine chromium --os Linux --d
 | `browser_reload` | Waits up to two seconds for active requests to settle, then reloads. |
 | `browser_type` | Appends text. Accepts `delay_ms` from `0..1000`, default `0`, or `humanize: true`. |
 | `browser_configure` | Changes session `humanize` without restarting the server. |
+| `browser_rotate_proxy` | Closes the active browser context and rotates the configured proxy session to the next pool proxy (clears auth associations unless `retain_associations: true`). |
 
 A readiness timeout leaves the page open.
 After an input timeout, inspect the field before any retry.
@@ -293,9 +294,22 @@ An existing image is not success.
 
 ### Interruption and denial
 
-Treat target HTTP 401/403 and Cloudflare challenges as access denial.
 Report proxy connection errors and HTTP 407 as proxy failures.
-Do not use direct routing, rotate automatically, or retry automatically.
+On HTTP 401/403 or a Cloudflare challenge, inspect `lastDenial` in `browser_status`:
+
+- `stage`: where the response was observed (`http_response`, `navigation_commit`).
+- `url`: origin and pathname only (query strings and fragments stripped).
+- `settings.configured` / `settings.effective`: active setting names and modes only (never header contents, tokens, or signed URLs).
+- `retryable`: `true` or `false`.
+- `reason`: plain-language summary.
+- `suggestions`: concrete setting changes to try (empty for managed challenges).
+
+| Signal | Action |
+| --- | --- |
+| `retryable: true` (first HTTP 401/403 for this URL and settings within 15 minutes) | Change settings using `lastDenial.suggestions` (channel, profile, compatibility mode, execution mode, humanize, saved login state, or `browser_rotate_proxy`) and navigate again. |
+| `retryable: false` (repeated 401/403 with unchanged URL and settings within 15 minutes, or a managed challenge) | Stop and report (or apply an untried setting change before retrying a 401/403). Never repeat unchanged settings, guess credentials, or bypass a configured or user-requested proxy to direct routing. |
+
+In-memory 15-minute TTL cache: the server fingerprints `(exact URL, settings)` privately in memory for 15 minutes (`PROMETHEUS_BROWSER_DENIAL_TTL_MS` overrides for tests). It is not a historical log: missing, expired, or cleared entries (after HTTP 2xx/3xx recovery, `browser_close`, or server restart) imply the URL is healthy to try again.
 
 Record intent before non-idempotent actions.
 After interruption, mark the outcome unknown.
@@ -320,4 +334,4 @@ It does not replay the action or restore the lost page.
 If the original page is unavailable, the action outcome remains unknown.
 Loss during human control or required handback inspection blocks recovery until explicit `browser_close`.
 See [operations recovery](BROWSER-OPERATIONS.md).
-Never use recovery to retry a denial.
+Never use context recovery to repeat an unchanged HTTP 401/403 or challenge.

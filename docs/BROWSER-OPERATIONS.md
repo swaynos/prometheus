@@ -17,8 +17,10 @@ Provider API requests use a separate direct service connection.
 Disclosure of the pinned browser proxy to the worker requires explicit `captcha.proxyMode: "browser"` policy.
 Before enabling solves, read [coverage, policy, and accounting](BROWSER-2CAPTCHA.md).
 
-Stop on access denial and managed challenges.
-Do not rotate or use direct routing to bypass denial.
+On HTTP 401/403 or other challenges, inspect `retryable` and `lastDenial.suggestions` in `browser_status`.
+If `retryable: true`, retry after changing settings (channel, profile, compatibility mode, execution mode, humanize, saved login state, or `browser_rotate_proxy`).
+If `retryable: false` (repeated identical failure or managed challenge), stop and report.
+When a proxy is configured or user-requested, never bypass it to direct routing.
 
 ## Installed layout
 
@@ -216,16 +218,15 @@ npm run browser:sessions -- bind-auth main store-login
 
 ### Explicit rotation
 
-1. Close the task browser.
-2. Finish or close all login helpers.
-3. Only for an explicitly requested rotation, run:
+In an active MCP session, call `browser_rotate_proxy` to close the browser context and rotate in one step (pass `retain_associations: true` to preserve auth bindings).
+From the CLI when no browser or login helper is running:
 
-   ```sh
-   npm run browser:sessions -- rotate main
-   npm run browser:sessions -- doctor
-   ```
+```sh
+npm run browser:sessions -- rotate main
+npm run browser:sessions -- doctor
+```
 
-Never rotate in response to target HTTP 401/403 or a challenge.
+The CLI rejects rotation while a browser or login helper is active; use `browser_rotate_proxy` inside an active MCP session.
 
 Rotation consumes the **shared global cursor** and increments generation.
 It can select the same proxy again after other allocations.
@@ -330,7 +331,8 @@ Restore a trusted private backup only after establishing ownership and inactivit
 Reconciliation of a changed proxy ID **or endpoint** increments generation and clears associations by default.
 Explicit `--retain-associations` preserves them with a warning.
 An unchanged assignment causes no update.
-No recovery command authorizes bypass of denial, direct fallback, or replay of an interrupted action.
+No recovery command authorizes silent direct fallback or replay of an interrupted action.
+See [resource selection](RESOURCE-SELECTION.md#interruption-and-denial) for retrying HTTP 401/403 with changed settings.
 
 ### Current limits
 
@@ -357,7 +359,7 @@ No recovery command authorizes bypass of denial, direct fallback, or replay of a
 Recovery reacquires the pinned proxy session on its existing generation without rotation.
 An attached CDP browser must be dedicated to automation.
 Its unrelated tabs and profile remain externally owned.
-Never use recovery after HTTP 401/403, challenge, or proxy denial as a way to retry access.
+Never use context recovery to repeat an unchanged HTTP 401/403, challenge, or proxy failure; setting changes are decided explicitly from `browser_status.lastDenial`.
 
 ### Update
 

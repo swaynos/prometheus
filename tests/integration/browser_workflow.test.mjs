@@ -39,7 +39,7 @@ test("compact rule retains shared safeguards", async () => {
     "visible, enabled controls", "verify entered values and attachment acceptance",
     "validate downloads/generated files locally", "existing image is not a new generation result",
     "mark the outcome unknown", "never automatically replay unknown actions",
-    "bounded waits", "report http 401/403 and challenges as access denial",
+    "bounded waits", "check `retryable` and `lastdenial.suggestions`",
   ]) assert.ok(text.includes(clause), `missing safeguard: ${clause}`);
 });
 

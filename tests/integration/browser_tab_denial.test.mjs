@@ -79,7 +79,7 @@ test(`new tab interrupted navigation uses only its own response (${channel})`, a
       const output = c.textOf(result);
       assert.equal(result.isError, true);
       assert.match(output, /tab \d+ created; navigation did not complete \(outcome unknown\)/i);
-      if (denial) assert.match(output, /access denied.*HTTP 403.*do not retry/i);
+      if (denial) assert.match(output, /access denied.*HTTP 403; retryable: (true|false)/i);
       else assert.doesNotMatch(output, /access denied/i);
     }
     for (const route of ['/interrupt-denied', '/interrupt-ok', '/interrupt-drop', '/interrupt-redirect', '/denied']) assert.equal(hits.get(route), 1, route);

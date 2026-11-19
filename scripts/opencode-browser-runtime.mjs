@@ -58,8 +58,13 @@ function validateContextOptions(value) {
   if (options.viewport === null && (options.screen !== undefined || options.deviceScaleFactor !== undefined)) {
     throw new Error("screen and deviceScaleFactor require a fixed viewport");
   }
-  if (options.userAgent !== undefined && (typeof options.userAgent !== "string" || !options.userAgent)) {
-    throw new Error("userAgent must be a non-empty string");
+  if (options.userAgent !== undefined) {
+    if (typeof options.userAgent !== "string" || !options.userAgent) {
+      throw new Error("userAgent must be a non-empty string");
+    }
+    if (/HeadlessChrome/i.test(options.userAgent)) {
+      throw new Error("userAgent must not contain HeadlessChrome");
+    }
   }
   if (options.locale !== undefined) {
     try {
@@ -415,8 +420,8 @@ export async function applyAutomationCompatibility(context) {
   if (typeof context?.addInitScript !== "function") return;
   await context.addInitScript(() => {
     try {
-      if (/HeadlessChrome/.test(navigator.userAgent)) {
-        const cleanUa = navigator.userAgent.replace(/HeadlessChrome/, "Chrome");
+      if (/HeadlessChrome/i.test(navigator.userAgent)) {
+        const cleanUa = navigator.userAgent.replace(/HeadlessChrome/gi, "Chrome");
         Object.defineProperty(Object.getPrototypeOf(navigator), "userAgent", { get: () => cleanUa, configurable: true });
       }
     } catch {}
@@ -478,7 +483,9 @@ export function nativeChromiumUserAgent(browserVersion, platform = process.platf
 }
 
 async function prepareContext(context, selected, profile) {
-  if (selected?.automationCompatibility) await applyAutomationCompatibility(context);
+  if ((configuredProfile(selected)?.engine ?? "chromium") === "chromium") {
+    await applyAutomationCompatibility(context);
+  }
   if (profile) await applyBrowserProfile(context, profile);
 }
 
@@ -500,7 +507,7 @@ export async function launchExternalCdpContext(chromium, selected, options = {})
     const userDataDir = cdp.userDataDir || (tempUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "prometheus-cdp-")));
     const execPath = resolveChromeExecutablePath(chromium, selected.channel);
     const headless = options.headless ?? selected.launchOptions?.headless ?? (selected.executionMode !== "virtual-display");
-    const ua = selected.contextOptions?.userAgent;
+    const ua = selected.contextOptions?.userAgent || (headless ? nativeChromiumUserAgent(null, process.platform, selected.channel) : null);
     const noSandbox = selected.launchOptions?.chromiumSandbox !== true;
     child = spawn(execPath, [
       ...(headless ? ["--headless=new"] : []),
@@ -532,6 +539,9 @@ export async function launchExternalCdpContext(chromium, selected, options = {})
     const profile = resolveIdentityProfile(selected);
     const contextOptions = browserContextOptions(selected);
     if (profile?.userAgent && !contextOptions.userAgent) contextOptions.userAgent = profile.userAgent;
+    if (!contextOptions.userAgent) {
+      contextOptions.userAgent = nativeChromiumUserAgent(browser.version?.() ?? null, process.platform, selected.channel);
+    }
     const existing = browser.contexts ? browser.contexts() : [];
     const context = existing.length > 0 ? existing[0] : await browser.newContext(contextOptions);
     await prepareContext(context, selected, profile);
@@ -824,7 +834,7 @@ export async function createTaskContext(chromium, config, engines, options = {})
     }
     browser = await browserType.launch(launchOptions);
     const browserVersion = browser.version?.() ?? null;
-    if (selected.automationCompatibility && !contextOptions.userAgent) {
+    if ((configuredProfile(selected)?.engine ?? "chromium") === "chromium" && !contextOptions.userAgent) {
       contextOptions.userAgent = nativeChromiumUserAgent(browserVersion, process.platform, selected.channel);
     }
     const context = await browser.newContext(contextOptions);

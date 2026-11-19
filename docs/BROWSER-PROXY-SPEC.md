@@ -99,8 +99,7 @@ Proxy support is optional, but routing through the assigned proxy is mandatory f
    Status may show session, generation, proxy ID, and configured routing.
    It must not claim verified public exit IP.
 4. On connection failure or HTTP 407, report proxy failure and retain the assignment.
-   On target HTTP 401/403 or challenge, apply existing denial rules.
-   Do not rotate to bypass denial.
+   On target HTTP 401/403 or other challenge, inspect `lastDenial` (`retryable`, `suggestions`) and use `browser_rotate_proxy` if changing proxy; when a proxy is configured or user-requested, never bypass it to direct routing.
 5. After an interrupted non-idempotent action, mark the outcome unknown.
    Inspect before any retry.
    Do not automatically replay actions, change routes, or weaken TLS verification.
@@ -109,7 +108,7 @@ Proxy support is optional, but routing through the assigned proxy is mandatory f
 
 ## 4. Interface and operations
 
-Provide explicit commands for creation, listing, inspection, rotation, and authentication association.
+Provide explicit commands for creation, listing, inspection, rotation (CLI `rotate` when idle, or MCP `browser_rotate_proxy` which atomically closes the task context first), and authentication association.
 Return sanitized metadata only.
 Configuration selects the session.
 Changes to selection must not alter an active browser.

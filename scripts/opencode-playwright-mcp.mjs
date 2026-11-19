@@ -9,7 +9,7 @@ import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { loadStateForOrigin, listStates } from "./opencode-browser-state.mjs";
 import { browserConfigFromEnv, browserLaunchOptions, browserRuntimeInfo, bundledBrowserInstall, createTaskContext, hydrateBrowserState } from "./opencode-browser-runtime.mjs";
-import { getSessionAuthRecords, sanitizePoolProxyError, verifyTaskSessionOwner } from "./opencode-browser-sessions.mjs";
+import { assertCanRotateSession, getSessionAuthRecords, rotateSession, sanitizePoolProxyError, verifyTaskSessionOwner } from "./opencode-browser-sessions.mjs";
 import { enterTaskDisplay } from "./opencode-browser-service.mjs";
 import { humanClick, humanType, applyNavigationDelay } from "./opencode-browser-humanize.mjs";
 import { inspectCaptchaCandidate, inspectCaptchaLifecycle } from "./opencode-browser-challenge.mjs";
@@ -32,6 +32,8 @@ const configuredMaxUpload = Number(process.env.PROMETHEUS_BROWSER_MAX_UPLOAD_BYT
 const MAX_UPLOAD_BYTES = Number.isSafeInteger(configuredMaxUpload) && configuredMaxUpload > 0 ? configuredMaxUpload : 20 * 1024 * 1024;
 const configuredMaxMediaPixels = Number(process.env.PROMETHEUS_BROWSER_MAX_MEDIA_PIXELS || 16 * 1024 * 1024);
 const MAX_MEDIA_PIXELS = Number.isFinite(configuredMaxMediaPixels) && configuredMaxMediaPixels > 0 ? Math.floor(configuredMaxMediaPixels) : 16 * 1024 * 1024;
+const configuredDenialTtl = Number(process.env.PROMETHEUS_BROWSER_DENIAL_TTL_MS || 15 * 60 * 1000);
+const DENIAL_TTL_MS = Number.isFinite(configuredDenialTtl) && configuredDenialTtl > 0 ? Math.floor(configuredDenialTtl) : 15 * 60 * 1000;
 const STATE_NAMES = (process.env.PROMETHEUS_BROWSER_STATES || "").split(",").map((s) => s.trim()).filter(Boolean);
 
 const SERVER_INFO = { name: "prometheus-browser", version: "1.1.0" };
@@ -84,6 +86,7 @@ const TOOLS = [
   toolDef("browser_tab_switch", "Switch the active tab by index.", { index: { type: "number" } }, ["index"]),
   toolDef("browser_tab_close", "Close a tab by index (default active).", { index: { type: "number" } }),
   toolDef("browser_configure", "Adjust runtime settings for the browser session without restarting the server.", { humanize: { type: "boolean", description: "Enable or disable simulated human behavior (typing delays, curved mouse movement, navigation delays) for all subsequent actions in this session." } }),
+  toolDef("browser_rotate_proxy", "Close the active browser context and rotate the configured proxy session to the next pool proxy. Clears bound auth associations by default.", { retain_associations: { type: "boolean", description: "Preserve existing saved auth associations across proxy rotation (default false)." } }),
   toolDef("browser_close", "Close the browser and reset state."),
 ];
 const EXPECT_SCHEMA = {
@@ -280,6 +283,7 @@ async function closeBrowser({ preserveTakeoverLoss = false } = {}) {
   references.clear();
   frameIds.clear();
   consoleMessages.length = 0;
+  clearDenialState();
   for (const page of ownedPages) { try { await page.close(); } catch {} }
   if (toClose) { try { await toClose.close(); } catch {} }
 }
@@ -504,6 +508,8 @@ async function observeChange(page, frame, expect, timeout, signal, action) {
   const initialUrl = page.url();
   let event = null;
   let denial = null;
+  let denialUrl = null;
+  let eventUrl = null;
   let navigationStatus = null;
   const errors = [];
   const onPopup = () => { event = { kind: "popup" }; };
@@ -513,10 +519,14 @@ async function observeChange(page, frame, expect, timeout, signal, action) {
       if (url.origin === new URL(initialUrl).origin && response.status() >= 400 && errors.length < 10) errors.push({ kind: "http_error", status: response.status() });
       if (response.request().isNavigationRequest() && response.frame() === page.mainFrame()) {
         navigationStatus = response.status();
-        if (response.status() === 401 || response.status() === 403) denial = { kind: "navigation", status: response.status() };
+        if (response.status() === 401 || response.status() === 403) {
+          denial = { kind: "navigation", status: response.status() };
+          denialUrl = response.url();
+        }
       }
       if (url.origin === new URL(initialUrl).origin && url.pathname === expect.path) {
         event = { kind: "response", status: response.status() };
+        eventUrl = response.url();
       }
     } catch { /* Non-HTTP URLs are not evidence. */ }
   };
@@ -540,7 +550,10 @@ async function observeChange(page, frame, expect, timeout, signal, action) {
           ...(action ? { diagnostic: "proxy failure after action dispatch; inspect the page before retrying manually" } : {}),
         };
       }
-      if (denial) return { status: "access_denied", evidence: denial };
+      if (denial) {
+        recordDenial(denial.status, denialUrl || page.url());
+        return { status: "access_denied", evidence: denial };
+      }
       if (navigationStatus !== null) {
         const classification = await navigationClassification(page, navigationStatus, Math.max(1, timeout - (Date.now() - started)));
         if (/challenge detected|access denied/i.test(classification)) return { status: "access_denied", evidence: { kind: "navigation", status: navigationStatus } };
@@ -548,7 +561,10 @@ async function observeChange(page, frame, expect, timeout, signal, action) {
       }
       if (expect.kind === "url" && page.url() !== initialUrl && page.url() === expect.url) return { status: "confirmed", evidence: { kind: "url" } };
       if (event) {
-        if (event.status === 401 || event.status === 403) return { status: "access_denied", evidence: event };
+        if (event.status === 401 || event.status === 403) {
+          recordDenial(event.status, eventUrl || page.url());
+          return { status: "access_denied", evidence: event };
+        }
         if (expect.kind !== "response" || expect.status === undefined || event.status === expect.status) return { status: "confirmed", evidence: event };
       }
       if (before) {
@@ -575,14 +591,166 @@ async function navigationClassification(page, status, timeout = DEFAULT_TIMEOUT)
   try {
     const title = await page.title();
     const challengeTitle = /^(?:just a moment[.!\s…]*|checking your browser.*|attention required.*cloudflare.*|verify (?:that )?you are human[.!\s]*)$/i.test(title.trim());
-    if (!denied && !challengeTitle) return status && status >= 400 ? ", HTTP error" : "";
+    if (!denied && !challengeTitle) {
+      if (status && status >= 200 && status < 400) recordHealthyNavigation(page.url());
+      return status && status >= 400 ? ", HTTP error" : "";
+    }
     const body = await page.locator("body").innerText({ timeout: Math.max(1, Math.min(timeout, 1000)) });
     const challengeBody = /checking your browser|verify (?:that )?you are human|performing security verification|enable javascript and cookies to continue/i.test(body);
     if (denied ? /cloudflare|just a moment|checking your browser|verify you are human/i.test(`${title}\n${body}`) : challengeTitle && challengeBody) {
-      return ", Cloudflare challenge detected; do not retry automatically";
+      const denial = recordDenial(status, page.url(), true);
+      return `, Cloudflare challenge detected; retryable: ${denial.retryable} — do not retry automatically`;
     }
   } catch {}
-  return denied ? ", access denied" : status && status >= 400 ? ", HTTP error" : "";
+  if (denied) {
+    const denial = recordDenial(status, page.url());
+    return `, access denied; retryable: ${denial.retryable} — ${denial.reason}`;
+  }
+  if (status && status >= 200 && status < 400) recordHealthyNavigation(page.url());
+  return status && status >= 400 ? ", HTTP error" : "";
+}
+
+// Structured denial diagnostics with a private in-memory 15-minute TTL cache.
+// Cache entries are keyed by SHA-256(exactUrl + settings) and never serialized.
+// A missing or expired entry implies the URL/configuration is healthy to try;
+// the cache is not a historical log and clears on browser_close or process exit.
+const denialCache = new Map();
+let lastDenial = null;
+let lastDenialExpiresAt = 0;
+
+function pruneDenialCache(now = Date.now()) {
+  for (const [key, entry] of denialCache) {
+    if (entry.expiresAt <= now) denialCache.delete(key);
+  }
+  if (lastDenial && lastDenialExpiresAt <= now) {
+    lastDenial = null;
+    lastDenialExpiresAt = 0;
+  }
+}
+
+function clearDenialState() {
+  denialCache.clear();
+  lastDenial = null;
+  lastDenialExpiresAt = 0;
+}
+
+function normalizedPrivateUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") return "";
+  try {
+    const parsed = new URL(rawUrl);
+    parsed.hash = "";
+    return parsed.href;
+  } catch {
+    return rawUrl;
+  }
+}
+
+function sanitizeDenialUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") return null;
+  try {
+    const parsed = new URL(rawUrl);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+function denialSettingsSnapshot(pageUrl) {
+  const configured = {};
+  for (const key of ["channel", "profile", "identityProfile", "executionMode", "automationCompatibility", "humanize"]) {
+    if (TASK_CONFIG[key] !== undefined) configured[key] = TASK_CONFIG[key];
+  }
+  const effective = { ...configured, humanize: Boolean(SESSION_CONFIG.humanize) };
+  let origin = null;
+  try { origin = pageUrl ? new URL(pageUrl).origin : null; } catch {}
+  effective.authenticated = Boolean(origin && hydratedOrigins.has(origin));
+  if (proxySession) {
+    effective.proxyId = proxySession.proxyId;
+    effective.proxyGeneration = proxySession.generation;
+  }
+  try {
+    const info = context && resolvedRuntime ? resolvedRuntime : browserRuntimeInfo(TASK_CONFIG);
+    effective.distribution = info.configuredDistribution;
+    if (info.profile?.id) effective.profile = info.profile.id;
+    if (TASK_CONFIG.contextOptions?.userAgent) effective.userAgent = "custom";
+    else if (info.profile?.id) effective.userAgent = "profile";
+    else effective.userAgent = "native-chromium";
+  } catch { /* config may be incomplete before first context */ }
+  return { configured, effective, origin };
+}
+
+function denialFingerprint(pageUrl, configured, effective) {
+  return createHash("sha256")
+    .update(JSON.stringify({ url: normalizedPrivateUrl(pageUrl), configured, effective }))
+    .digest("hex");
+}
+
+function buildDenialSuggestions(effective, origin, challenge) {
+  if (challenge) return [];
+  const suggestions = [];
+  if (effective.userAgent === "custom" || TASK_CONFIG.automationCompatibility === false) {
+    suggestions.push("remove custom contextOptions.userAgent and keep automationCompatibility: true");
+  }
+  if (["chromium-headless-shell", "chromium"].includes(effective.distribution)) {
+    suggestions.push("switch channel to chrome or msedge");
+  }
+  if (!effective.profile && !TASK_CONFIG.profile && !TASK_CONFIG.identityProfile) {
+    suggestions.push("configure a desktop profile (for example desktop-macos-chrome-fhd, desktop-windows-firefox-fhd, pw-desktop-firefox, or pw-desktop-safari) or identityProfile");
+  }
+  if (!TASK_CONFIG.executionMode || TASK_CONFIG.executionMode === "headless") {
+    suggestions.push("try executionMode: virtual-display or headed for full browser rendering");
+  }
+  if (origin && !hydratedOrigins.has(origin)) {
+    suggestions.push("capture or load saved authentication state for this origin before navigating");
+  }
+  if (!SESSION_CONFIG.humanize) {
+    suggestions.push("enable humanize: true (via browser_configure or config) and review contextOptions (locale, timezoneId, viewport, colorScheme)");
+  }
+  if (TASK_CONFIG.proxy) {
+    suggestions.push("rotate to the next configured proxy with browser_rotate_proxy");
+  }
+  return suggestions;
+}
+
+function recordHealthyNavigation(pageUrl) {
+  const now = Date.now();
+  pruneDenialCache(now);
+  if (!denialCache.size && !lastDenial) return;
+  const { configured, effective } = denialSettingsSnapshot(pageUrl);
+  denialCache.delete(denialFingerprint(pageUrl, configured, effective));
+  const sanitized = sanitizeDenialUrl(pageUrl);
+  if (lastDenial && sanitized && lastDenial.url === sanitized) {
+    lastDenial = null;
+    lastDenialExpiresAt = 0;
+  }
+}
+
+function recordDenial(status, pageUrl, challenge = false, stage = "http_response") {
+  const now = Date.now();
+  pruneDenialCache(now);
+  const { configured, effective, origin } = denialSettingsSnapshot(pageUrl);
+  const fingerprint = denialFingerprint(pageUrl, configured, effective);
+  const repeated = denialCache.has(fingerprint);
+  const expiresAt = now + DENIAL_TTL_MS;
+  denialCache.set(fingerprint, { expiresAt });
+  const retryable = !challenge && !repeated;
+  const suggestions = buildDenialSuggestions(effective, origin, challenge);
+  lastDenial = {
+    stage,
+    status,
+    url: sanitizeDenialUrl(pageUrl),
+    settings: { configured, effective },
+    retryable,
+    reason: challenge
+      ? "managed challenge; stop and report"
+      : repeated
+        ? "same URL and settings already failed; change settings or stop"
+        : "change settings from suggestions to retry, or stop",
+    suggestions,
+    at: new Date(now).toISOString(),
+  };
+  lastDenialExpiresAt = expiresAt;
+  return lastDenial;
 }
 
 // A Chrome error-document commit can interrupt goto while the requested document's
@@ -631,7 +799,8 @@ async function runObservedNavigation(page, url, remaining, navigate) {
       await observation.waitForResponse(Math.min(500, remaining()));
     }
     if (!proxyRelay?.getLastFailure() && (observation?.status === 401 || observation?.status === 403)) {
-      throw new Error(`access denied: requested document returned HTTP ${observation.status}; do not retry automatically`);
+      const denial = recordDenial(observation.status, url, false, "navigation_commit");
+      throw new Error(`access denied: requested document returned HTTP ${observation.status}; retryable: ${denial.retryable} — ${denial.reason}`);
     }
     throw error;
   } finally { observation?.close(); }
@@ -835,6 +1004,7 @@ const HANDLERS = {
     } catch { return text({ status: 'not_submitted', reason: 'unsupported_or_interrupted', outcome: 'not-submitted' }); }
   },
   async browser_status() {
+    pruneDenialCache();
     if (humanControl || inspectionRequired) return text({ runtime: SERVER_INFO.name, mode: TASK_CONFIG.executionMode, control: humanControl ? "human" : "inspection_required", contextOpen: Boolean(context && browser?.isConnected()), pageOpen: Boolean((humanControl?.page || handbackPage) && !(humanControl?.page || handbackPage).isClosed()) });
     const page = pages[activeIndex];
     const pageOpen = Boolean(page && !page.isClosed());
@@ -872,6 +1042,7 @@ const HANDLERS = {
       })(),
       browserVersion: browser?.version() ?? null,
       contextOpen: Boolean(context),
+      ...(lastDenial ? { lastDenial } : {}),
       ...(takeoverLost ? { control: "session_lost" } : {}),
       ...(recoveryRequired ? { recovery: "explicit_navigation_required" } : {}),
       pageOpen,
@@ -1384,6 +1555,18 @@ const HANDLERS = {
       SESSION_CONFIG.humanize = args.humanize;
     }
     return text({ configured: true, humanize: SESSION_CONFIG.humanize });
+  },
+  async browser_rotate_proxy(args = {}) {
+    if (!TASK_CONFIG.proxy) throw new Error("proxy is not configured for this browser task");
+    if (!CONFIG_DIR) throw new Error("PROMETHEUS_CONFIG_DIR is required for proxy sessions");
+    if (Object.keys(args).some(k => k !== "retain_associations")) throw new Error("invalid browser_rotate_proxy arguments");
+    if (args.retain_associations !== undefined && typeof args.retain_associations !== "boolean") {
+      throw new Error("retain_associations must be boolean");
+    }
+    await assertCanRotateSession(CONFIG_DIR, TASK_CONFIG, { allowOwnerId: proxySession?.ownerId ?? null });
+    await closeBrowser();
+    const rotated = await rotateSession(CONFIG_DIR, TASK_CONFIG, { retainAssociations: Boolean(args.retain_associations) });
+    return text({ rotated: true, contextClosed: true, ...rotated });
   },
   async browser_close() {
     await closeBrowser();

@@ -302,7 +302,7 @@ Test with distinctive synthetic secrets, including launch errors and installer d
 Where observable, classify connection/tunnel errors and HTTP 407 as proxy failure.
 Distinguish target denial when evidence supports it.
 After interruption of a dispatched action, preserve the unknown outcome.
-Never retry, rotate, bypass, or relax TLS automatically.
+When a proxy is configured, never bypass it to direct routing or relax TLS verification.
 
 ## 8. Testing and qualification
 

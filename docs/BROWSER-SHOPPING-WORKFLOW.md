@@ -23,7 +23,7 @@ Linux virtual-display does not automatically provide a human-accessible desktop 
 The headed login helper captures authentication in a **separate context**, which does not contain the live cart.
 
 Do not export storage, cookies, or credentials.
-Do not switch routes or rotate a proxy.
+When a proxy is configured or user-requested, never bypass it to direct routing.
 A session generation pins one configured endpoint, not a guaranteed exit IP.
 
 ## Cart procedure
@@ -33,7 +33,7 @@ A session generation pins one configured endpoint, not a guaranteed exit IP.
 2. Navigate with a bounded timeout.
    Stop on HTTP 401/403, proxy failure, managed challenge, or unverified navigation.
    This includes challenge pages with HTTP 200.
-   Do not retry automatically, use direct routing, rotate, or use a diagnostic workaround.
+   Check `retryable` and `lastDenial.suggestions` in `browser_status`: retry after changing settings (including `browser_rotate_proxy`) if `retryable: true`; stop and report if `retryable: false`. When a proxy is configured or user-requested, never bypass it to direct routing.
    Paid CAPTCHA support does not authorize bypass of managed challenges.
    See [CAPTCHA coverage and disclosure](BROWSER-2CAPTCHA.md).
 3. Inspect `browser_status`, `browser_snapshot`, and `browser_interactive_elements`.

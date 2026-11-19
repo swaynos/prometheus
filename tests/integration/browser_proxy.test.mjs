@@ -1211,3 +1211,123 @@ test("staged install and probe ignore proxy secrets/allocation and block unsafe 
   assert.match(stagedStatus, /"session":"real-probe-sess"/);
   assert.doesNotMatch(stagedStatus, /18444|stage-cred|endpointFingerprint/);
 });
+
+test("browser_rotate_proxy atomically closes the context, rotates to the next proxy, and guards active login helpers", async (t) => {
+  const dir = makeConfigDir(t);
+  const credsA = { username: "rotUserA", password: "RotPasswordA#1" };
+  const credsB = { username: "rotUserB", password: "RotPasswordB#2" };
+  const credRelA = "prometheus-proxy-secrets/rot-a.json";
+  const credRelB = "prometheus-proxy-secrets/rot-b.json";
+  writeSecretFile(dir, credRelA, credsA);
+  writeSecretFile(dir, credRelB, credsB);
+
+  const proxyA = createAuthProxyFixture(t, credsA);
+  const proxyAUrl = await proxyA.start();
+  const proxyB = createAuthProxyFixture(t, credsB);
+  const proxyBUrl = await proxyB.start();
+
+  // First request (via proxyA) gets 403; subsequent request (via proxyB) gets 200.
+  let hits = 0;
+  const targetServer = http.createServer((req, res) => {
+    hits += 1;
+    if (req.url === "/gate" && hits === 1) {
+      res.writeHead(403, { "Content-Type": "text/html", "Cache-Control": "no-store" });
+      res.end("<h1>Blocked on proxy A</h1>");
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
+    res.end("<h1>Allowed</h1>");
+  });
+  await new Promise((resolve) => targetServer.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((r) => targetServer.close(() => r())));
+  const targetOrigin = `http://127.0.0.1:${targetServer.address().port}`;
+
+  const cfg = {
+    channel: testChannel,
+    executionMode: "headless",
+    proxy: {
+      session: "rot-test",
+      strategy: "round-robin",
+      pool: [
+        { id: "proxy-a", server: proxyAUrl, credentialsFile: credRelA },
+        { id: "proxy-b", server: proxyBUrl, credentialsFile: credRelB },
+      ],
+    },
+  };
+  writeBrowserSettings(dir, cfg);
+  await createSession(dir, cfg);
+  saveState({ configDir: dir, name: "acct-gen1", origins: ["https://example.com"], storageState: { cookies: [], origins: [] } });
+  saveState({ configDir: dir, name: "acct-gen2", origins: ["https://example.com"], storageState: { cookies: [], origins: [] } });
+  await bindAuthRecord(dir, "rot-test", "acct-gen1");
+
+  const mcp = spawnMcpClient({ PROMETHEUS_CONFIG_DIR: dir }, { captureStderr: true });
+  t.after(async () => { await mcp.close().catch(() => {}); });
+  await mcp.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "rotate-test", version: "1.0" } });
+
+  // 1. Navigate via proxyA -> HTTP 403; diagnostics suggest browser_rotate_proxy.
+  const denied = mcp.textOf(await mcp.call("browser_navigate", { url: `${targetOrigin}/gate` }));
+  assert.match(denied, /status 403, access denied; retryable: true/i);
+  const status1 = JSON.parse(mcp.textOf(await mcp.call("browser_status")));
+  assert.equal(status1.contextOpen, true);
+  assert.equal(status1.proxy.proxyId, "proxy-a");
+  assert.equal(status1.proxy.generation, 1);
+  assert.equal(status1.lastDenial.retryable, true);
+  assert.equal(status1.lastDenial.settings.effective.proxyId, "proxy-a");
+  assert.equal(status1.lastDenial.settings.effective.proxyGeneration, 1);
+  assert.ok(status1.lastDenial.suggestions.some((s) => /browser_rotate_proxy/.test(s)));
+
+  // 2. Rotate in one MCP call without calling browser_close first.
+  const rotRes = await mcp.call("browser_rotate_proxy", {});
+  assert.equal(rotRes.isError, undefined);
+  const rotText = mcp.textOf(rotRes);
+  assert.doesNotMatch(rotText, /rotUserA|RotPasswordA|rotUserB|RotPasswordB|endpointFingerprint|127\.0\.0\.1/);
+  const rot = JSON.parse(rotText);
+  assert.equal(rot.rotated, true);
+  assert.equal(rot.contextClosed, true);
+  assert.equal(rot.session, "rot-test");
+  assert.equal(rot.proxyId, "proxy-b");
+  assert.equal(rot.generation, 2);
+  assert.deepEqual(rot.authRecords, []);
+
+  // Status reflects closed context, cleared lastDenial, and new generation.
+  const status2 = JSON.parse(mcp.textOf(await mcp.call("browser_status")));
+  assert.equal(status2.contextOpen, false);
+  assert.equal(status2.lastDenial, undefined);
+  assert.equal(status2.proxy.proxyId, "proxy-b");
+  assert.equal(status2.proxy.generation, 2);
+
+  // 3. Next navigation automatically launches on proxyB and succeeds.
+  const retryText = mcp.textOf(await mcp.call("browser_navigate", { url: `${targetOrigin}/gate` }));
+  assert.match(retryText, /status 200/);
+  assert.ok(proxyA.httpRequests.length >= 1, "initial request traversed proxyA");
+  assert.ok(proxyB.httpRequests.some((r) => r.url === `${targetOrigin}/gate`), "post-rotation request traversed proxyB");
+
+  // 4. retain_associations: true preserves auth bindings across rotation with warning.
+  await bindAuthRecord(dir, "rot-test", "acct-gen2");
+  const rotRetain = JSON.parse(mcp.textOf(await mcp.call("browser_rotate_proxy", { retain_associations: true })));
+  assert.equal(rotRetain.proxyId, "proxy-a");
+  assert.equal(rotRetain.generation, 3);
+  assert.deepEqual(rotRetain.authRecords, ["acct-gen2"]);
+  assert.ok(rotRetain.warnings?.length > 0);
+
+  // 5. Active login helper blocks rotation WITHOUT closing the active browser context.
+  await mcp.call("browser_navigate", { url: `${targetOrigin}/gate` });
+  const handoff = await issueLoginHandoff(dir, cfg);
+  const helper = await joinLoginHelper(dir, cfg, { session: "rot-test", handoffId: handoff.handoffId });
+  t.after(() => helper.release());
+  const blocked = await mcp.call("browser_rotate_proxy", {});
+  assert.equal(blocked.isError, true);
+  assert.match(mcp.textOf(blocked), /login helper is active/i);
+  const statusStillOpen = JSON.parse(mcp.textOf(await mcp.call("browser_status")));
+  assert.equal(statusStillOpen.contextOpen, true, "browser remains open when rotation pre-check fails");
+  helper.release();
+});
+
+test("browser_rotate_proxy rejects cleanly when proxy is not configured", async (t) => {
+  const mcp = spawnMcpClient({ PROMETHEUS_BROWSER_CHANNEL: testChannel });
+  t.after(async () => { await mcp.close().catch(() => {}); });
+  await mcp.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "no-proxy-rotate", version: "1.0" } });
+  const res = await mcp.call("browser_rotate_proxy", {});
+  assert.equal(res.isError, true);
+  assert.match(mcp.textOf(res), /proxy is not configured/i);
+});
