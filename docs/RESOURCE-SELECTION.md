@@ -223,6 +223,17 @@ Tool booleans record declarations, not human identity.
 
 6. Verify task access in a fresh task browser context.
    Do not complete the task in the login window.
+   Use `browser_session_health` (or `opencode-browser-login.mjs health --config-dir "$HOME/.config/opencode" --name site`) to inspect captured pre/post-login DOM cues and quickly verify session health.
+
+### Session health context and quick checks
+
+During login `start` (before handing control to the user) and `complete` (after the user replies), `opencode-browser-login.mjs` captures sanitized structural DOM snapshots—never polling during human control and never recording cookies, storage values, query strings, fragments, or `<input>` values.
+It derives differential signals (`checkUrl`, `healthySelectors`, `unhealthySelectors`, `unhealthyUrlPaths`, and `externalAuthOrigins`) and stores them in the mode-`0600` authentication record.
+
+- Call `browser_session_health` with no arguments to inspect the captured health blueprint (`status: "not_open"` if no browser is running) or evaluate the active page in milliseconds without extra navigation.
+- Pass `navigate_to_check_url: true` to hydrate state, navigate to `checkUrl`, and evaluate live DOM health in one call.
+- Verdicts are `healthy`, `unhealthy`, or `inconclusive` (when on an unrelated subpage or when pre/post DOMs had no distinguishing selectors).
+- `browser_status` also surfaces `sessionHealth` for origins with captured health context.
 
 ### Login route and proxy session
 

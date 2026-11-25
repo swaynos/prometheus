@@ -644,3 +644,123 @@ test("browser_configure tool dynamically toggles humanize across subsequent acti
     await closeFixture(httpServer, c);
   }
 });
+
+test("browser_session_health inspects blueprints before launch and evaluates healthy vs expired sessions", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const root = await mkdtemp(path.join(os.tmpdir(), "prometheus-health-mcp-"));
+  const sessions = path.join(root, "prometheus-sessions");
+  await mkdir(sessions, { mode: 0o700 });
+  const origin = new URL(base).origin;
+  const healthContext = {
+    version: 1,
+    capturedAt: new Date().toISOString(),
+    checkUrl: `${origin}/`,
+    loginUrl: `${origin}/`,
+    sameUrlComparison: true,
+    signals: {
+      healthySelectors: ["#account-menu"],
+      unhealthySelectors: [],
+      unhealthyUrlPaths: [],
+      externalAuthOrigins: [],
+    },
+    before: {
+      approvedOrigin: true,
+      url: `${origin}/`,
+      pathname: "/",
+      title: "",
+      hasAuthForm: false,
+      headings: ["Fixture Home"],
+      landmarks: [],
+      controls: [{ tag: "button", selector: "#go", label: "Go" }],
+    },
+    after: {
+      approvedOrigin: true,
+      url: `${origin}/`,
+      pathname: "/",
+      title: "",
+      hasAuthForm: false,
+      headings: ["Fixture Home"],
+      landmarks: [],
+      controls: [{ tag: "button", selector: "#account-menu", label: "Signed in account" }],
+    },
+  };
+
+  await writeFile(path.join(sessions, "account.json"), JSON.stringify({
+    schemaVersion: 1,
+    name: "account",
+    origins: [origin],
+    capturedAt: new Date().toISOString(),
+    storageState: {
+      cookies: [],
+      origins: [{ origin, localStorage: [{ name: "authenticated", value: "yes" }] }],
+    },
+    verification: { method: "user-confirmed" },
+    health: healthContext,
+  }), { mode: 0o600 });
+
+  const healthyClient = client({ PROMETHEUS_CONFIG_DIR: root });
+  const expiredRoot = await mkdtemp(path.join(os.tmpdir(), "prometheus-health-expired-"));
+  const expiredSessions = path.join(expiredRoot, "prometheus-sessions");
+  await mkdir(expiredSessions, { mode: 0o700 });
+  await writeFile(path.join(expiredSessions, "account.json"), JSON.stringify({
+    schemaVersion: 1,
+    name: "account",
+    origins: [origin],
+    capturedAt: new Date().toISOString(),
+    storageState: {
+      cookies: [],
+      origins: [{ origin, localStorage: [{ name: "authenticated", value: "expired" }] }],
+    },
+    verification: { method: "user-confirmed" },
+    health: healthContext,
+  }), { mode: 0o600 });
+  const expiredClient = client({ PROMETHEUS_CONFIG_DIR: expiredRoot });
+
+  try {
+    // 1. Inspect blueprint before opening a browser (zero launch)
+    const preOpen = JSON.parse(healthyClient.textOf(await healthyClient.call("browser_session_health", {})));
+    assert.equal(preOpen.status, "not_open");
+    assert.equal(preOpen.checkUrl, `${origin}/`);
+    assert.deepEqual(preOpen.signals.healthySelectors, ["#account-menu"]);
+    assert.equal(preOpen.after.controls[0].selector, "#account-menu");
+    assert.equal(JSON.parse(healthyClient.textOf(await healthyClient.call("browser_status"))).contextOpen, false);
+
+    // 2. Fast live check with navigate_to_check_url: true when session is healthy
+    const healthyCheck = JSON.parse(healthyClient.textOf(await healthyClient.call("browser_session_health", {
+      navigate_to_check_url: true,
+      include_snapshots: false,
+    })));
+    assert.equal(healthyCheck.status, "healthy");
+    assert.deepEqual(healthyCheck.live.matchedHealthySelectors, ["#account-menu"]);
+    assert.equal(healthyCheck.before, undefined);
+
+    const healthyStatus = JSON.parse(healthyClient.textOf(await healthyClient.call("browser_status")));
+    assert.equal(healthyStatus.hydratedAuthentication, true);
+    assert.equal(healthyStatus.authenticationVerification, "verified");
+    assert.equal(healthyStatus.sessionHealth.status, "healthy");
+    assert.equal(healthyStatus.sessionHealth.checkUrl, `${origin}/`);
+
+    // 3. Navigating to an unrelated subpage returns inconclusive without throwing
+    const subNav = await healthyClient.call("browser_navigate", { url: `${base}/second` });
+    assert.equal(subNav.isError, undefined, healthyClient.textOf(subNav));
+    const subCheck = JSON.parse(healthyClient.textOf(await healthyClient.call("browser_session_health", {})));
+    assert.equal(subCheck.status, "inconclusive");
+    assert.match(subCheck.reason, /differs from checkUrl/);
+
+    // 4. Expired session on checkUrl reports unhealthy and keeps hydratedAuthentication false
+    const expiredNav = await expiredClient.call("browser_navigate", { url: `${base}/` });
+    assert.equal(expiredNav.isError, undefined, expiredClient.textOf(expiredNav));
+    assert.match(expiredClient.textOf(expiredNav), /session health warning: unhealthy/);
+    const expiredCheck = JSON.parse(expiredClient.textOf(await expiredClient.call("browser_session_health", {})));
+    assert.equal(expiredCheck.status, "unhealthy");
+    const expiredStatus = JSON.parse(expiredClient.textOf(await expiredClient.call("browser_status")));
+    assert.equal(expiredStatus.hydratedAuthentication, false);
+    assert.equal(expiredStatus.authenticationVerification, "pending");
+    assert.equal(expiredStatus.sessionHealth.status, "unhealthy");
+  } finally {
+    try { await closeFixture(httpServer, healthyClient, expiredClient); } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(expiredRoot, { recursive: true, force: true });
+    }
+  }
+});

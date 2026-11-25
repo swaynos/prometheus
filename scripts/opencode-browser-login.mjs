@@ -14,9 +14,14 @@ import {
   hostMatchesCookieDomain,
   saveState,
   statMetadata,
+  readHealthContext,
   listStates,
   removeState,
 } from "./opencode-browser-state.mjs";
+import {
+  captureLoginSnapshot,
+  buildHealthContext,
+} from "./opencode-browser-health.mjs";
 import {
   browserLaunchOptions,
   browserContextOptions,
@@ -267,7 +272,7 @@ export async function startLogin(opts, dependencies = {}) {
   });
 }
 
-export async function captureConfirmedState(context, opts) {
+export async function captureConfirmedState(context, opts, { beforeSnapshot = null, preferredPage = null } = {}) {
   const pages = context.pages();
   if (!pages.length) throw new LoginError("login window closed before capture");
   const approved = pages.filter(page => opts.origins.includes(new URL(page.url()).origin));
@@ -277,7 +282,16 @@ export async function captureConfirmedState(context, opts) {
   if (opts.captureSessionStorage) {
     for (const page of approved) Object.assign(sessionStorage, await captureSessionStorage(page, opts.origins));
   }
-  return { storageState, sessionStorage: opts.captureSessionStorage ? sessionStorage : undefined };
+  const targetPage = preferredPage && approved.includes(preferredPage) ? preferredPage : approved[approved.length - 1];
+  const afterSnapshot = await captureLoginSnapshot(targetPage, opts.origins);
+  const health = afterSnapshot?.approvedOrigin
+    ? buildHealthContext({ before: beforeSnapshot, after: afterSnapshot, origins: opts.origins })
+    : undefined;
+  return {
+    storageState,
+    sessionStorage: opts.captureSessionStorage ? sessionStorage : undefined,
+    ...(health ? { health } : {}),
+  };
 }
 
 export function loginBrowserConfig(config) {
@@ -294,7 +308,7 @@ export function loginBrowserConfig(config) {
 }
 
 export async function serveLogin(opts, dependencies = {}) {
-  let context, cdpBrowser, loginPage, profileDir, closing, helperLease = null, proxyRelay = null, busy = false, listening = false, ready = false;
+  let context, cdpBrowser, loginPage, profileDir, closing, beforeSnapshot = null, helperLease = null, proxyRelay = null, busy = false, listening = false, ready = false;
   const closeBrowser = async () => {
     if (cdpBrowser) {
       await loginPage?.close().catch(() => {});
@@ -354,8 +368,12 @@ export async function serveLogin(opts, dependencies = {}) {
         if (!["complete", "cancel"].includes(action)) { socket.end(JSON.stringify({ error: "unknown login command" })); return; }
         busy = true;
         try {
+          let captured = null;
           if (action === "complete") {
-            const captured = await beforeDeadline(() => captureConfirmedState(context, opts), Date.now() + OPERATION_TIMEOUT_MS);
+            captured = await beforeDeadline(
+              () => captureConfirmedState(context, opts, { beforeSnapshot, preferredPage: loginPage }),
+              Date.now() + OPERATION_TIMEOUT_MS,
+            );
             if (opts.browser.proxy && helperLease) {
               (dependencies.verifySessionGeneration || verifySessionGeneration)(
                 opts.configDir,
@@ -374,7 +392,14 @@ export async function serveLogin(opts, dependencies = {}) {
             }
           }
           await cleanup();
-          socket.end(JSON.stringify({ status: action === "complete" ? "saved" : "cancelled", name: opts.name, ...(action === "complete" ? { authentication: "unverified" } : {}) }));
+          socket.end(JSON.stringify({
+            status: action === "complete" ? "saved" : "cancelled",
+            name: opts.name,
+            ...(action === "complete" ? {
+              authentication: "unverified",
+              ...(captured?.health ? { healthCheck: { captured: true, checkUrl: captured.health.checkUrl } } : {}),
+            } : {}),
+          }));
         } catch (error) {
           const safeMsg = sanitizePoolProxyError(error, opts.browser, helperLease?.credentials);
           socket.end(JSON.stringify({
@@ -430,6 +455,7 @@ export async function serveLogin(opts, dependencies = {}) {
     if (relayFailure?.kind === "proxy_connection") {
       throw new LoginError(`proxy connection failed (${relayFailure.code}); do not retry automatically or fall back to direct connection`);
     }
+    beforeSnapshot = await captureLoginSnapshot(loginPage, opts.origins);
     ready = true;
     if (process.connected) process.send({ status: "awaiting-user", name: opts.name });
   } catch (error) {
@@ -450,12 +476,21 @@ function status(args) {
   const configDir = requireConfigDir(args);
   if (args.name && args.name !== true) {
     const meta = statMetadata(configDir, args.name);
-    process.stdout.write(meta ? `[${meta.name}] origins=${meta.origins.join(",")} capturedAt=${meta.capturedAt}\n` : `[missing] ${args.name}\n`);
+    process.stdout.write(meta ? `[${meta.name}] origins=${meta.origins.join(",")} capturedAt=${meta.capturedAt}${meta.checkUrl ? ` checkUrl=${meta.checkUrl}` : ""}\n` : `[missing] ${args.name}\n`);
     return 0;
   }
   const rows = listStates(configDir);
   if (!rows.length) { process.stdout.write("No captured sessions\n"); return 0; }
-  for (const meta of rows) process.stdout.write(`[${meta.name}] origins=${(meta.origins || []).join(",")} capturedAt=${meta.capturedAt ?? "?"}\n`);
+  for (const meta of rows) process.stdout.write(`[${meta.name}] origins=${(meta.origins || []).join(",")} capturedAt=${meta.capturedAt ?? "?"}${meta.checkUrl ? ` checkUrl=${meta.checkUrl}` : ""}\n`);
+  return 0;
+}
+
+function health(args) {
+  const configDir = requireConfigDir(args);
+  if (!args.name || args.name === true) throw new LoginError("--name is required for health");
+  const info = readHealthContext(configDir, args.name);
+  if (!info) { process.stdout.write(`[missing] ${args.name}\n`); return 1; }
+  process.stdout.write(`${JSON.stringify(info, null, 2)}\n`);
   return 0;
 }
 
@@ -490,10 +525,12 @@ async function main(argv) {
       throw new LoginError("blocking capture was removed; use start, ask the user to log in and reply, then complete");
     case "status":
       return status(args);
+    case "health":
+      return health(args);
     case "remove":
       return remove(args);
     default:
-      process.stderr.write("usage: opencode-browser-login.mjs <start|complete|cancel|pending|status|remove> --config-dir <dir> [--name <name>] ...\n");
+      process.stderr.write("usage: opencode-browser-login.mjs <start|complete|cancel|pending|status|health|remove> --config-dir <dir> [--name <name>] ...\n");
       throw new LoginError(action ? `unknown action: ${action}` : "no action given");
   }
 }

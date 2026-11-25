@@ -371,3 +371,88 @@ for (const action of ["complete", "cancel", "navigation-failure", "attachment-fa
     }
   });
 }
+
+test("detached login captures before/after DOM health snapshots and exposes them via CLI health", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cw-login-health-"));
+  const worker = path.join(dir, "worker.mjs");
+  const starter = path.join(dir, "starter.mjs");
+  const cli = async (action) => JSON.parse((await run(process.execPath, [helper, action, "--config-dir", dir, "--name", "portal"])).stdout);
+  try {
+    await writeFile(worker, `
+      import { chromium } from ${JSON.stringify(import.meta.resolve("playwright"))};
+      import { serveLogin } from ${JSON.stringify(new URL("../../scripts/opencode-browser-login.mjs", import.meta.url).href)};
+      process.once('message', async opts => {
+        await serveLogin(opts, { chromium: { launchPersistentContext: async (profile, options) => {
+          const context = await chromium.launchPersistentContext(profile, {...options, headless: true});
+          await context.route('https://portal.example/**', route => {
+            const url = new URL(route.request().url());
+            if (url.pathname === '/login') {
+              return route.fulfill({ contentType: 'text/html', body:
+                '<!doctype html><html><head><title>Sign in</title></head><body><form id="login-form"><input name="user" value="alice@example.com"><input type="password" value="TOP-SECRET-PWD"><button id="login-submit">Sign in</button></form></body></html>' });
+            }
+            return route.fulfill({ contentType: 'text/html', body:
+              '<!doctype html><html><head><title>Dashboard</title></head><body><script>localStorage.setItem("auth_tok", "PRIVATE-TOKEN-VAL"); document.cookie="sid=PRIVATE-COOKIE-VAL; Secure";</script><nav id="account-menu"><a href="/logout">Sign out</a></nav><main><h1>Portal Home</h1></main></body></html>' });
+          });
+          process.once('SIGUSR2', async () => {
+            const p = context.pages()[0];
+            if (p) await p.goto('https://portal.example/dashboard');
+            await import('node:fs/promises').then(fs => fs.writeFile(${JSON.stringify(path.join(dir, "logged-in"))}, 'ok'));
+          });
+          return context;
+        }}});
+      });
+    `);
+    await writeFile(path.join(dir, "prometheus-browser.json"), JSON.stringify({
+      channel: "default",
+      contextOptions: { viewport: { width: 1280, height: 800 } },
+    }));
+    const opts = login.validateStartArgs({
+      "config-dir": dir,
+      name: "portal",
+      url: "https://portal.example/login",
+      origin: ["https://portal.example"],
+    });
+    await writeFile(starter, `
+      import { fork } from 'node:child_process';
+      import { writeFileSync } from 'node:fs';
+      import { startLogin } from ${JSON.stringify(new URL("../../scripts/opencode-browser-login.mjs", import.meta.url).href)};
+      const result = await startLogin(${JSON.stringify(opts)}, { fork: (_file, args, options) => {
+        const child = fork(${JSON.stringify(worker)}, args, options);
+        writeFileSync(${JSON.stringify(path.join(dir, "pid"))}, String(child.pid));
+        return child;
+      }});
+      console.log(JSON.stringify(result));
+    `);
+
+    const started = JSON.parse((await run(process.execPath, [starter])).stdout);
+    assert.equal(started.status, "awaiting-user");
+
+    // Simulate user logging in and landing on /dashboard
+    process.kill(Number(await readFile(path.join(dir, "pid"), "utf8")), "SIGUSR2");
+    for (let i = 0; i < 100; i++) {
+      try { await stat(path.join(dir, "logged-in")); break; } catch { await new Promise((r) => setTimeout(r, 25)); }
+    }
+
+    const completed = await cli("complete");
+    assert.equal(completed.status, "saved");
+    assert.deepEqual(completed.healthCheck, { captured: true, checkUrl: "https://portal.example/dashboard" });
+
+    const state = loadStateForOrigin({ configDir: dir, name: "portal", origin: "https://portal.example" });
+    assert.equal(state.health.checkUrl, "https://portal.example/dashboard");
+    assert.equal(state.health.loginUrl, "https://portal.example/login");
+    assert.equal(state.health.sameUrlComparison, false);
+    assert.ok(state.health.signals.healthySelectors.includes("#account-menu"));
+    assert.ok(state.health.signals.unhealthySelectors.includes('input[type="password"]'));
+    assert.deepEqual(state.health.signals.unhealthyUrlPaths, ["/login"]);
+
+    const healthCli = await cli("health");
+    assert.equal(healthCli.health.checkUrl, "https://portal.example/dashboard");
+    assert.doesNotMatch(JSON.stringify(healthCli), /PRIVATE-TOKEN-VAL|PRIVATE-COOKIE-VAL|TOP-SECRET-PWD|alice@example\.com/);
+
+    const statusOut = (await invoke(["status", "--config-dir", dir, "--name", "portal"])).stdout;
+    assert.match(statusOut, /checkUrl=https:\/\/portal\.example\/dashboard/);
+  } finally {
+    await cli("cancel").catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  }
+});

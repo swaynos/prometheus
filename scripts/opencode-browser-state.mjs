@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normaliseHealthContext } from "./opencode-browser-health.mjs";
 
 export const SESSIONS_DIRNAME = "prometheus-sessions";
 export const STATE_SCHEMA_VERSION = 1;
@@ -109,7 +110,15 @@ function normaliseVerification(verification) {
   return { selector };
 }
 
-export function saveState({ configDir, name, origins, storageState, sessionStorage, verification }) {
+function safeNormaliseHealth(health, origins) {
+  try {
+    return normaliseHealthContext(health, origins);
+  } catch (err) {
+    throw new BrowserStateError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+export function saveState({ configDir, name, origins, storageState, sessionStorage, verification, health }) {
   assertValidName(name);
   const normOrigins = normaliseOrigins(origins);
   if (!storageState || typeof storageState !== "object") throw new BrowserStateError("storageState object is required");
@@ -126,6 +135,8 @@ export function saveState({ configDir, name, origins, storageState, sessionStora
   };
   const normalizedVerification = normaliseVerification(verification);
   if (normalizedVerification) record.verification = normalizedVerification;
+  const normalizedHealth = safeNormaliseHealth(health, normOrigins);
+  if (normalizedHealth) record.health = normalizedHealth;
   const tmp = `${file}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
   try { fs.chmodSync(tmp, 0o600); } catch {}
@@ -158,6 +169,7 @@ export function loadStateForOrigin({ configDir, name, origin }) {
     storageState: filtered.storageState,
     sessionStorage: filtered.sessionStorage || null,
     verification: normaliseVerification(record.verification) || null,
+    health: safeNormaliseHealth(record.health, record.origins) || null,
     origins: record.origins.slice(),
   };
 }
@@ -166,6 +178,7 @@ export function statMetadata(configDir, name) {
   const record = readRecord(configDir, name);
   if (!record) return null;
   const ver = normaliseVerification(record.verification);
+  const health = safeNormaliseHealth(record.health, record.origins);
   return {
     name: record.name,
     origins: record.origins.slice(),
@@ -173,6 +186,19 @@ export function statMetadata(configDir, name) {
     hasSessionStorage: Boolean(record.sessionStorage),
     hasVerificationSelector: Boolean(ver?.selector),
     userConfirmed: ver?.method === "user-confirmed",
+    hasHealthContext: Boolean(health),
+    checkUrl: health?.checkUrl ?? null,
+  };
+}
+
+export function readHealthContext(configDir, name) {
+  const record = readRecord(configDir, name);
+  if (!record) return null;
+  return {
+    name: record.name,
+    origins: record.origins.slice(),
+    capturedAt: record.capturedAt,
+    health: safeNormaliseHealth(record.health, record.origins) || null,
   };
 }
 
@@ -238,6 +264,14 @@ function main(argv) {
       process.stdout.write(`${JSON.stringify(meta, null, 2)}\n`);
       return 0;
     }
+    case "health": {
+      const configDir = resolveConfigDir(args);
+      if (!args.name) throw new BrowserStateError("--name is required for health");
+      const info = readHealthContext(configDir, args.name);
+      if (!info) { process.stderr.write(`no saved state named ${args.name}\n`); return 1; }
+      process.stdout.write(`${JSON.stringify(info, null, 2)}\n`);
+      return 0;
+    }
     case "remove": {
       const configDir = resolveConfigDir(args);
       if (!args.name) throw new BrowserStateError("--name is required for remove");
@@ -245,7 +279,7 @@ function main(argv) {
       return 0;
     }
     default:
-      process.stderr.write("usage: opencode-browser-state.mjs <list|status|remove> --config-dir <dir> [--name <name>]\n");
+      process.stderr.write("usage: opencode-browser-state.mjs <list|status|health|remove> --config-dir <dir> [--name <name>]\n");
       return command ? 1 : 0;
   }
 }

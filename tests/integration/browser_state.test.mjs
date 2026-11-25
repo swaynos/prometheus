@@ -13,6 +13,7 @@ import {
   saveState,
   loadStateForOrigin,
   statMetadata,
+  readHealthContext,
   listStates,
   removeState,
   readRecord,
@@ -158,4 +159,48 @@ test("a symlinked sessions directory is rejected", () => {
     BrowserStateError,
   );
   assert.throws(() => listStates(configDir), BrowserStateError);
+});
+
+test("saveState, loadStateForOrigin, and readHealthContext round-trip health context without leaking secrets", () => {
+  const configDir = tmpConfig();
+  saveState({
+    configDir,
+    name: "acct-health",
+    origins: ["https://example.com"],
+    storageState: sampleState,
+    verification: { method: "user-confirmed" },
+    health: {
+      checkUrl: "https://example.com/dashboard?token=SHOULD-STRIP",
+      loginUrl: "https://example.com/login#frag",
+      sameUrlComparison: false,
+      signals: {
+        healthySelectors: ["#account-menu"],
+        unhealthySelectors: ['input[type="password"]'],
+        unhealthyUrlPaths: ["/login"],
+        externalAuthOrigins: [],
+      },
+      before: { approvedOrigin: true, url: "https://example.com/login", hasAuthForm: true },
+      after: { approvedOrigin: true, url: "https://example.com/dashboard", hasAuthForm: false },
+    },
+  });
+
+  const meta = statMetadata(configDir, "acct-health");
+  assert.equal(meta.hasHealthContext, true);
+  assert.equal(meta.checkUrl, "https://example.com/dashboard");
+  assert.doesNotMatch(JSON.stringify(meta), /SECRET-|SHOULD-STRIP/);
+
+  const loaded = loadStateForOrigin({ configDir, name: "acct-health", origin: "https://example.com" });
+  assert.equal(loaded.health.checkUrl, "https://example.com/dashboard");
+  assert.equal(loaded.health.loginUrl, "https://example.com/login");
+  assert.deepEqual(loaded.health.signals.healthySelectors, ["#account-menu"]);
+
+  const healthInfo = readHealthContext(configDir, "acct-health");
+  assert.equal(healthInfo.health.checkUrl, "https://example.com/dashboard");
+  assert.doesNotMatch(JSON.stringify(healthInfo), /SECRET-COOKIE-VALUE|SECRET-LS-VALUE|SHOULD-STRIP/);
+
+  // Legacy records without health still load with health: null
+  saveState({ configDir, name: "legacy", origins: ["https://example.com"], storageState: sampleState });
+  assert.equal(statMetadata(configDir, "legacy").hasHealthContext, false);
+  assert.equal(statMetadata(configDir, "legacy").checkUrl, null);
+  assert.equal(loadStateForOrigin({ configDir, name: "legacy", origin: "https://example.com" }).health, null);
 });

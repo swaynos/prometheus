@@ -208,6 +208,13 @@ Reopening `main` retains its proxy and generation.
 
 5. Verify task access in a fresh task context.
    Saved state alone does not prove access.
+   Inspect captured pre/post-login health signals with:
+
+   ```sh
+   node "$PROMETHEUS_CONFIG_DIR/prometheus-browser/opencode-browser-login.mjs" health --config-dir "$PROMETHEUS_CONFIG_DIR" --name store-login
+   ```
+
+   In an MCP session, call `browser_session_health` (optionally with `navigate_to_check_url: true`) for a quick live check.
 
 Successful capture binds `store-login` to the session generation.
 Alternatively, explicitly bind an existing approved record:

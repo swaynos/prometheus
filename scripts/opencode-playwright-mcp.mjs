@@ -8,6 +8,7 @@ import { lstat, mkdir, writeFile, open, realpath } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { loadStateForOrigin, listStates } from "./opencode-browser-state.mjs";
+import { evaluatePageHealth } from "./opencode-browser-health.mjs";
 import { browserConfigFromEnv, browserLaunchOptions, browserRuntimeInfo, bundledBrowserInstall, createTaskContext, hydrateBrowserState } from "./opencode-browser-runtime.mjs";
 import { assertCanRotateSession, getSessionAuthRecords, rotateSession, sanitizePoolProxyError, verifyTaskSessionOwner } from "./opencode-browser-sessions.mjs";
 import { enterTaskDisplay } from "./opencode-browser-service.mjs";
@@ -49,6 +50,7 @@ const toolDef = (name, description, properties = {}, required) => ({
 const TOOLS = [
   toolDef("browser_navigate", "Navigate to a URL. Optionally select a load event and wait for a visible readiness selector without fixed sleeps.", { url: { type: "string" }, wait_until: { type: "string", enum: WAIT_UNTIL_ENUM }, ready_selector: { type: "string" }, timeout: { type: "number", description: "Total navigation/readiness budget in seconds, bounded by the transport budget." }, humanize: { type: "boolean", description: "Simulate human behavior (2-4s settle delay post-navigation)." } }, ["url"]),
   toolDef("browser_status", "Return non-secret browser runtime and page health metadata."),
+  toolDef("browser_session_health", "Quickly check whether a saved login session is healthy using captured pre/post-login DOM structure and differential selectors.", { origin: { type: "string", description: "Approved origin to check (defaults to active page origin or sole hydrated/saved origin)." }, navigate_to_check_url: { type: "boolean", description: "Navigate to the captured post-login checkUrl before evaluating (default false)." }, include_snapshots: { type: "boolean", description: "Include captured before/after structural DOM snapshots (default true)." }, timeout: { type: "number", description: "Navigation/check budget in seconds when navigate_to_check_url is true." } }),
   toolDef("browser_takeover", "Pause agent access to an existing explicitly headed managed task for user control; requires prior user consent.", { user_requested: { type: "boolean" } }, ["user_requested"]),
   toolDef("browser_handback", "Resume after the user explicitly confirms handback; inspect the page before further actions.", { user_confirmed: { type: "boolean" } }, ["user_confirmed"]),
   toolDef("browser_challenge_inspect", "Inspect a standalone Turnstile/reCAPTCHA v2 widget or operator-configured CAPTCHA adapter. Never solves or retries; access-denied pages remain unsupported."),
@@ -121,6 +123,8 @@ let activeIndex = 0;
 const consoleMessages = [];
 const hydratedOrigins = new Map();
 const verifiedOrigins = new Set();
+const originHealthContexts = new Map();
+const originHealthResults = new Map();
 const frameIds = new Map();
 const references = new Map();
 const navigationStatuses = new WeakMap();
@@ -280,6 +284,8 @@ async function closeBrowser({ preserveTakeoverLoss = false } = {}) {
   activeIndex = 0;
   hydratedOrigins.clear();
   verifiedOrigins.clear();
+  originHealthContexts.clear();
+  originHealthResults.clear();
   references.clear();
   frameIds.clear();
   consoleMessages.length = 0;
@@ -304,11 +310,74 @@ function candidateStateNames() {
   try { return listStates(CONFIG_DIR).map((m) => m.name); } catch { return []; }
 }
 
+function resolveSavedHealthForOrigin(origin) {
+  if (!origin) return null;
+  if (hydratedOrigins.has(origin)) {
+    const entry = hydratedOrigins.get(origin);
+    return {
+      origin,
+      origins: entry.origins || [origin],
+      verification: entry,
+      health: originHealthContexts.get(origin) || null,
+    };
+  }
+  if (!CONFIG_DIR) return null;
+  for (const name of candidateStateNames()) {
+    let loaded;
+    try { loaded = loadStateForOrigin({ configDir: CONFIG_DIR, name, origin }); } catch { continue; }
+    if (!loaded) continue;
+    return {
+      name,
+      origin,
+      origins: loaded.origins || [origin],
+      verification: loaded.verification,
+      health: loaded.health || null,
+    };
+  }
+  return null;
+}
+
+function resolveTargetHealthOrigin(requestedOrigin) {
+  if (requestedOrigin !== undefined) {
+    let parsed;
+    try { parsed = new URL(requestedOrigin); } catch { throw new Error("origin must be a valid http(s) URL or origin"); }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("origin must be http(s)");
+    return parsed.origin;
+  }
+  const page = pages[activeIndex];
+  let pageOrigin = null;
+  if (page && !page.isClosed()) {
+    try {
+      const parsed = new URL(page.url());
+      if (parsed.protocol === "https:" || parsed.protocol === "http:") pageOrigin = parsed.origin;
+    } catch {}
+  }
+  if (pageOrigin && resolveSavedHealthForOrigin(pageOrigin)) return pageOrigin;
+  if (pageOrigin) {
+    for (const [hydratedOrigin, health] of originHealthContexts) {
+      if (health?.signals?.externalAuthOrigins?.includes(pageOrigin)) return hydratedOrigin;
+    }
+  }
+  if (hydratedOrigins.size === 1) return [...hydratedOrigins.keys()][0];
+  if (CONFIG_DIR) {
+    const origins = new Set();
+    for (const name of candidateStateNames()) {
+      const rows = listStates(CONFIG_DIR).filter((m) => m.name === name);
+      for (const row of rows) for (const o of row.origins || []) origins.add(o);
+    }
+    if (origins.size === 1) return [...origins][0];
+    if (origins.size > 1) throw new Error("multiple saved origins exist; pass origin explicitly");
+  }
+  return pageOrigin;
+}
+
 async function maybeHydrate(url) {
   if (!CONFIG_DIR) return;
   let origin;
   try { origin = new URL(url).origin; } catch { return; }
-  if (hydratedOrigins.has(origin)) return { origin, ...hydratedOrigins.get(origin) };
+  if (hydratedOrigins.has(origin)) {
+    return { origin, ...hydratedOrigins.get(origin), health: originHealthContexts.get(origin) || null };
+  }
   let stateWithoutVerification = false;
   for (const name of candidateStateNames()) {
     let loaded;
@@ -319,8 +388,9 @@ async function maybeHydrate(url) {
       continue;
     }
     await hydrateBrowserState(context, loaded);
-    hydratedOrigins.set(origin, loaded.verification);
-    return { origin, ...loaded.verification };
+    hydratedOrigins.set(origin, { ...loaded.verification, origins: loaded.origins });
+    if (loaded.health) originHealthContexts.set(origin, loaded.health);
+    return { origin, ...loaded.verification, origins: loaded.origins, health: loaded.health || null };
   }
   if (stateWithoutVerification) {
     throw new Error("saved login state has no account verification selector; complete a new login capture");
@@ -329,7 +399,20 @@ async function maybeHydrate(url) {
 }
 
 async function verifyHydratedAccount(page, hydration) {
-  if (!hydration || verifiedOrigins.has(hydration.origin) || hydration.method === "user-confirmed") return;
+  if (!hydration) return;
+  if (hydration.method === "user-confirmed") {
+    if (hydration.health) {
+      const assessment = await evaluatePageHealth(page, hydration.health, {
+        httpStatus: navigationStatuses.get(page) ?? null,
+        approvedOrigins: hydration.origins || [hydration.origin],
+      });
+      originHealthResults.set(hydration.origin, assessment);
+      if (assessment.status === "healthy") verifiedOrigins.add(hydration.origin);
+      else if (assessment.status === "unhealthy") verifiedOrigins.delete(hydration.origin);
+    }
+    return;
+  }
+  if (verifiedOrigins.has(hydration.origin)) return;
   let visible = false;
   try { visible = await page.locator(hydration.selector).first().isVisible(); } catch {}
   if (!visible) {
@@ -928,6 +1011,7 @@ const HANDLERS = {
     frameIds.clear();
     consoleMessages.length = 0;
     verifiedOrigins.clear();
+    originHealthResults.clear();
     bindingRevision++;
     humanControl = null;
     inspectionRequired = true;
@@ -1052,6 +1136,131 @@ const HANDLERS = {
       hydratedAuthentication: Boolean(origin && verifiedOrigins.has(origin)),
       authenticationVerification: origin && hydratedOrigins.has(origin)
         ? (verifiedOrigins.has(origin) ? "verified" : "pending") : "none",
+      ...(() => {
+        const healthOrigin = origin && (originHealthContexts.has(origin) || originHealthResults.has(origin))
+          ? origin
+          : (hydratedOrigins.size === 1 ? [...hydratedOrigins.keys()][0] : null);
+        const healthCtx = healthOrigin ? originHealthContexts.get(healthOrigin) : null;
+        const healthRes = healthOrigin ? originHealthResults.get(healthOrigin) : null;
+        if (!healthCtx && !healthRes) return {};
+        return {
+          sessionHealth: {
+            status: healthRes?.status ?? "unverified",
+            checkUrl: healthCtx?.checkUrl ?? null,
+            ...(healthRes ? {
+              reason: healthRes.reason,
+              matchedHealthySelectors: healthRes.live.matchedHealthySelectors,
+              matchedUnhealthySelectors: healthRes.live.matchedUnhealthySelectors,
+            } : {}),
+          },
+        };
+      })(),
+    });
+  },
+  async browser_session_health(args = {}) {
+    if (args.origin !== undefined && typeof args.origin !== "string") throw new Error("origin must be a string");
+    if (args.navigate_to_check_url !== undefined && typeof args.navigate_to_check_url !== "boolean") {
+      throw new Error("navigate_to_check_url must be boolean");
+    }
+    if (args.include_snapshots !== undefined && typeof args.include_snapshots !== "boolean") {
+      throw new Error("include_snapshots must be boolean");
+    }
+    const navigateToCheckUrl = Boolean(args.navigate_to_check_url);
+    const includeSnapshots = args.include_snapshots === undefined ? true : args.include_snapshots;
+    const origin = resolveTargetHealthOrigin(args.origin);
+    if (!origin) {
+      return text({ status: "no_saved_state", reason: "no open page origin or saved authentication state found" });
+    }
+    const saved = resolveSavedHealthForOrigin(origin);
+    if (!saved) {
+      return text({ status: "no_saved_state", origin, reason: "no saved authentication state matches this origin" });
+    }
+    if (!saved.health) {
+      const page = pages[activeIndex];
+      const pageOpen = Boolean(page && !page.isClosed());
+      if (saved.verification?.selector && pageOpen) {
+        let visible = false;
+        try { visible = await page.locator(saved.verification.selector).first().isVisible(); } catch {}
+        return text({
+          status: visible ? "healthy" : "unhealthy",
+          origin,
+          hasHealthContext: false,
+          hasVerificationSelector: true,
+          reason: visible ? "matched verification selector" : "verification selector is not visible",
+        });
+      }
+      return text({
+        status: "no_health_context",
+        origin,
+        hasHealthContext: false,
+        hasVerificationSelector: Boolean(saved.verification?.selector),
+        reason: "saved state has no captured before/after DOM health context; complete a new login capture to enable DOM health checks",
+      });
+    }
+
+    const health = saved.health;
+    originHealthContexts.set(origin, health);
+
+    let page = pages[activeIndex];
+    let httpStatus = page && !page.isClosed() ? (navigationStatuses.get(page) ?? null) : null;
+    let challengeDetected = false;
+
+    if (navigateToCheckUrl) {
+      const budget = args.timeout !== undefined ? boundedWaitMs(args.timeout) : DEFAULT_TIMEOUT;
+      await ensureContext();
+      recoveryRequired = false;
+      await maybeHydrate(health.checkUrl);
+      page = await ensureActivePage();
+      const started = Date.now();
+      const remaining = () => Math.max(1, budget - (Date.now() - started));
+      const resp = await runObservedNavigation(page, health.checkUrl, remaining, () =>
+        page.goto(health.checkUrl, { waitUntil: "domcontentloaded", timeout: remaining() }),
+      );
+      httpStatus = resp ? resp.status() : null;
+      if (httpStatus === 407 || proxyRelay?.getLastFailure()) {
+        throw classifyProxyError(new Error("proxy failure"), httpStatus);
+      }
+      const classification = await navigationClassification(page, httpStatus, remaining());
+      if (/challenge detected/i.test(classification)) challengeDetected = true;
+    } else if (!page || page.isClosed()) {
+      return text({
+        status: "not_open",
+        origin,
+        checkUrl: health.checkUrl,
+        loginUrl: health.loginUrl,
+        sameUrlComparison: health.sameUrlComparison,
+        signals: health.signals,
+        ...(includeSnapshots ? { before: health.before, after: health.after } : {}),
+        guidance: "Navigate to checkUrl or call browser_session_health with navigate_to_check_url: true to run a live check.",
+      });
+    }
+
+    let assessment = await evaluatePageHealth(page, health, {
+      httpStatus,
+      approvedOrigins: saved.origins,
+    });
+    if (challengeDetected && assessment.status !== "unhealthy") {
+      assessment = {
+        ...assessment,
+        status: "unhealthy",
+        reason: "managed challenge detected on checkUrl; do not retry automatically",
+      };
+    }
+    originHealthResults.set(origin, assessment);
+    if (hydratedOrigins.has(origin)) {
+      if (assessment.status === "healthy") verifiedOrigins.add(origin);
+      else if (assessment.status === "unhealthy") verifiedOrigins.delete(origin);
+    }
+    return text({
+      status: assessment.status,
+      reason: assessment.reason,
+      origin,
+      checkUrl: health.checkUrl,
+      loginUrl: health.loginUrl,
+      sameUrlComparison: health.sameUrlComparison,
+      live: assessment.live,
+      signals: health.signals,
+      ...(includeSnapshots ? { before: health.before, after: health.after } : {}),
     });
   },
   async browser_navigate(args) {
@@ -1085,7 +1294,20 @@ const HANDLERS = {
     }
     if (!classification) await verifyHydratedAccount(page, hydration);
     if (resolveHumanize(args.humanize)) await applyNavigationDelay(remaining());
-    return text(`navigated to ${page.url()} (status ${status ?? "n/a"}${classification})${hydration?.method === "user-confirmed" ? "; user-confirmed state loaded: verify account or requested task access in this context before claiming login success" : ""}`);
+    let authNote = "";
+    if (hydration?.method === "user-confirmed") {
+      const assessment = originHealthResults.get(hydration.origin);
+      if (!assessment) {
+        authNote = "; user-confirmed state loaded: verify account or requested task access in this context before claiming login success";
+      } else if (assessment.status === "healthy") {
+        authNote = `; session health verified (${assessment.reason})`;
+      } else if (assessment.status === "unhealthy") {
+        authNote = `; session health warning: unhealthy (${assessment.reason})`;
+      } else {
+        authNote = `; user-confirmed state loaded (session health inconclusive: ${assessment.reason})`;
+      }
+    }
+    return text(`navigated to ${page.url()} (status ${status ?? "n/a"}${classification})${authNote}`);
   },
   async browser_navigate_back() {
     return navigateHistory(activePage(), -1);
