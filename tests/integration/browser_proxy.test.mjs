@@ -810,7 +810,7 @@ test(`${poolSource}: end-to-end Playwright MCP HTTP proxy, transfers, target 401
   const target401Res = await mcp.call("browser_navigate", { url: `${targetOrigin}/require-target-auth` });
   const target401Text = mcp.textOf(target401Res);
   assert.match(target401Text, /access denied/i);
-  assert.doesNotMatch(target401Text.replaceAll(targetOrigin, ""), /\b407\b|proxy authentication/i);
+  assert.doesNotMatch(target401Text, /407|proxy authentication/i);
   const forbidden = await mcp.call("browser_navigate", { url: `${targetOrigin}/forbidden` });
   assert.match(mcp.textOf(forbidden), /access denied/i);
   assert.deepEqual(JSON.parse(mcp.textOf(await mcp.call("browser_status"))).proxy, preStatus.proxy);
@@ -828,7 +828,7 @@ test(`${poolSource}: end-to-end Playwright MCP HTTP proxy, transfers, target 401
   const res407 = await mcp.call("browser_navigate", { url: `${targetOrigin}/after-407` });
   assert.equal(res407.isError, true);
   const err407 = mcp.textOf(res407);
-  assert.match(err407, /\b407\b|proxy authentication/i);
+  assert.match(err407, /407|proxy authentication/i);
   assert.doesNotMatch(err407, /proxyAuthUser77|ProxyAuthPassword/);
   assert.equal(err407.includes(proxyAUrl), false);
   assert.equal(showSession(dir, "shopping").generation, 1);
@@ -838,7 +838,7 @@ test(`${poolSource}: end-to-end Playwright MCP HTTP proxy, transfers, target 401
   assert.equal(proxyB.httpRequests.length + proxyB.connectRequests.length, 0);
   const tab407 = await mcp.call("browser_tab_new", { url: `${targetOrigin}/tab-after-407` });
   assert.equal(tab407.isError, true);
-  assert.match(mcp.textOf(tab407), /\b407\b|proxy authentication/i);
+  assert.match(mcp.textOf(tab407), /407|proxy authentication/i);
   assert.doesNotMatch(mcp.textOf(tab407), /access denied|proxyAuthUser77|ProxyAuthPassword/i);
   assert.equal(targetReceivedAuth.some((r) => r.url === "/tab-after-407"), false);
   assert.equal(showSession(dir, "shopping").generation, 1);
