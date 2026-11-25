@@ -7,6 +7,7 @@ Each section states what the plugin must preserve, provide, or prohibit.
 
 - Use `/spike` for technical investigation and `/grill-me` to clarify user decisions.
 - Provide records through `prometheus_record` and independent verification through `prometheus_verify`.
+- Include the `project-check-in` skill for timestamped, evidence-based project updates.
 - Leave execution, tool dispatch, permissions, and `/goal` continuation to OpenCode.
 - Do not provide another agent loop, a custom shell runner, or an OS sandbox.
 - Keep the managed browser runtime and human-invoked `/browser` command separate.
@@ -82,3 +83,15 @@ Each section states what the plugin must preserve, provide, or prohibit.
 - Reject legacy `grant` and campaign execution.
 - Require stable OpenCode `>=2.2.1 <3.0.0`.
 - Pin SDK dependencies to a tested release.
+
+## 6. Project check-in skill
+
+- Bundle `skills/project-check-in/SKILL.md` in the plugin package, including packed archives, and register it through the native skill API.
+- Keep existing user or project skills with the same ID, including definitions hidden from autoinvocation. Dispose the plugin registration on unload without changing files.
+- Answer the goal, measurement position, remaining work, and how to measure the remainder in four ordered sections. Name actual measurement sources; distinguish verified results from plans, unknowns, and untested work; never invent goals, progress, completion, baselines, or test results.
+- Use the user's local date and time. If the project, destination, or time zone is unclear, ask rather than guess.
+- Save each run as a new timestamped Markdown file at the chosen or established project documentation location. Confirm the path does not exist before writing; add numeric suffixes on collision. Never overwrite, truncate, or purge earlier check-ins. Report a saved path only after verifying the write.
+- Support requested embedded check-ins as appended sections with unique timestamped headings. Inspect the existing file first and preserve earlier sections and unrelated content.
+- Use existing test results. Do not run tests, builds, project commands, application code, deployments, or other project work to produce a check-in; describe how to measure unverified work instead.
+- In Plan, read-only, or permission-denied contexts, do not bypass restrictions with another tool, agent, or path. Provide the check-in in chat when possible, state that it was not saved, and explain why.
+- Follow project instructions and native permissions. A check-in does not authorize goal execution, delegation, or changes to task, issue, or reminder state.

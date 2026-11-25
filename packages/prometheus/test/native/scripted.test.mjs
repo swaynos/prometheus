@@ -4,6 +4,73 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isolated, tool, promptText, until } from './helpers.mjs';
 
+test('the packed project check-in loads through the native skill tool', { timeout: 90000 }, async t => {
+  let step = 0;
+  const h = await isolated(t, { packed: true, handler: input => {
+    if (step++ === 0) {
+      assert.match(promptText(input), /project-check-in/);
+      return tool(input, 'skill', { id: 'project-check-in' });
+    }
+    const text = promptText(input);
+    assert.match(text, /Now tell me, what is the goal\?/);
+    assert.match(text, /Then tell me how to measure what remains\./);
+    assert.match(text, /Never overwrite, truncate, or purge an earlier check-in/);
+    return { text: 'The project check-in instructions loaded. No project work was started.' };
+  } });
+  const session = await h.create('build', [{ action: 'skill', resource: 'project-check-in', effect: 'allow' }]);
+  await h.request(`/api/session/${session.id}/prompt`, { text: 'Load the project check-in skill only. Do not create a check-in or start project work.' });
+  await h.wait(session.id);
+  const context = (await h.request(`/api/session/${session.id}/context`)).data;
+  const loads = context.filter(message => message.type === 'assistant').flatMap(message => message.content)
+    .filter(part => part.type === 'tool' && part.name === 'skill');
+  assert.equal(loads.length, 1);
+  assert.equal(loads[0].state.status, 'completed');
+  assert.ok(step >= 2);
+  assert.equal((await h.request(`/api/session?parentID=${session.id}`)).data.length, 0);
+});
+
+test('a Plan check-in falls back to chat without attempting a write', { timeout: 90000 }, async t => {
+  let step = 0;
+  const h = await isolated(t, { packed: true, handler: input => {
+    if (step++ === 0) return tool(input, 'skill', { id: 'project-check-in' });
+    const text = promptText(input);
+    assert.match(text, /Plan, read-only, or permission-denied contexts/);
+    assert.match(text, /do not try another tool,\s+agent, path, or method/);
+    assert.match(text, /say clearly that it was not saved/);
+    assert.match(text, /Do not start `\/goal`, delegate to a\s+subagent/);
+    return { text: [
+      '## What is the goal?',
+      'The goal is unknown from the available project context.',
+      '',
+      '## Where do we measure against that goal?',
+      'No measurement source was verified.',
+      '',
+      '## What remains against the goal?',
+      'The goal and current position are unknown.',
+      '',
+      '## How do we measure what remains?',
+      'Clarify the goal and inspect its stated acceptance measures.',
+      '',
+      'Not saved: this Plan session is read-only.',
+    ].join('\n') };
+  } });
+  const session = await h.create('plan', [{ action: 'skill', resource: 'project-check-in', effect: 'allow' }]);
+  await h.request(`/api/session/${session.id}/prompt`, { text: 'Give me a project check-in and save it if permitted.' });
+  await h.wait(session.id);
+  const context = (await h.request(`/api/session/${session.id}/context`)).data;
+  const toolCalls = context.filter(message => message.type === 'assistant').flatMap(message => message.content)
+    .filter(part => part.type === 'tool');
+  assert.deepEqual(toolCalls.map(part => part.name), ['skill']);
+  const response = context.filter(message => message.type === 'assistant').flatMap(message => message.content)
+    .filter(part => part.type === 'text').map(part => part.text).join('\n');
+  for (const section of ['What is the goal?', 'Where do we measure against that goal?', 'What remains against the goal?', 'How do we measure what remains?']) {
+    assert.ok(response.includes(section), `Missing check-in section: ${section}`);
+  }
+  assert.match(response, /Not saved: this Plan session is read-only/);
+  assert.deepEqual(fs.readdirSync(h.root), []);
+  assert.equal((await h.request(`/api/session?parentID=${session.id}`)).data.length, 0);
+});
+
 test('spike uses native shell and preserves normal editing tools', { timeout: 90000 }, async t => {
   let step = 0;
   const h = await isolated(t, { handler: input => {

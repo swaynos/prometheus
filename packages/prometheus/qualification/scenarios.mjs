@@ -8,6 +8,7 @@ export const workflows = [
   ['N06', 'Independent verification', 'A fresh evaluator uses actual native tool evidence and reports every criterion.'],
   ['N07', 'Repair in origin', 'Failed verification returns evidence. The origin repairs work. Prometheus does not dispatch repairs.'],
   ['N08', 'Human control', 'Native permission denials and cancellation remain effective. Reload does not restart work.'],
+  ['N09', 'Project check-in', 'The bundled skill reports four evidence-based sections, saves only when permitted, and falls back to an unsaved chat response when writing is restricted.'],
 ].map(([id, name, expected]) => ({ id, name, expected }));
 export const faults = [
   ['F01', 'Changed candidate', 'Changed files cannot retain an accepted status for the current candidate. Hashes detect changes but do not prevent them.'],
@@ -16,4 +17,5 @@ export const faults = [
   ['F04', 'Unknown admission outcome', 'A lost evaluator-admission receipt is reported as interrupted, not replayed.'],
   ['F05', 'Legacy state', 'Old records remain untouched and inspectable. Old allowances and run states do not start work.'],
   ['F06', 'Unavailable checks', 'A denied or unavailable required check remains unresolved, not accepted.'],
+  ['F07', 'Check-in preservation', 'Existing notes are not overwritten; collisions get a new name, and requested append operations preserve earlier and unrelated content.'],
 ].map(([id, name, expected]) => ({ id, name, expected }));

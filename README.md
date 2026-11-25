@@ -16,6 +16,10 @@ Install Prometheus using the [package guide](packages/prometheus/README.md), the
 
 Prometheus also provides `prometheus_record` for findings and decisions, and `prometheus_verify` for independent candidate verification. Verification uses a fresh evaluator session and completed tool results; it is not an OS sandbox or an automatic repair loop.
 
+## Project check-ins
+
+The plugin includes the `project-check-in` skill for four-section, evidence-based project updates. When native permissions allow, it saves each check-in as a new timestamped Markdown file or appends a section when requested. In Plan, read-only, or permission-denied contexts, it provides the update in chat and says it was not saved; it does not run project checks or change task or reminder state. Existing user or project skills with the same ID are preserved. See the [package guide](packages/prometheus/README.md#project-updates).
+
 ## Browser integration
 
 The optional managed browser runs separately from Prometheus goals. See the [browser operations guide](docs/BROWSER-OPERATIONS.md) for installation, configuration, and recovery.

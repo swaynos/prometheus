@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { isolated } from './helpers.mjs';
+import { isolated, until } from './helpers.mjs';
 
 test('the packed plugin loads beside native goal, including at the home location', { timeout: 90000 }, async t => {
   const h = await isolated(t, { packed: true });
@@ -20,6 +20,12 @@ test('the packed plugin loads beside native goal, including at the home location
   assert.equal(commands.filter(command => command.name === 'goal').length, 1);
   assert.match(commands.find(command => command.name === 'goal').description, /pause\|resume\|clear/);
   for (const name of ['spike', 'grill-me']) assert.ok(commands.some(command => command.name === name));
+  const checkIn = (await h.request('/api/skill')).data.find(skill => skill.id === 'project-check-in');
+  assert.ok(checkIn, 'The packed plugin registers its bundled skill.');
+  assert.equal(checkIn.path, path.join(h.runtime, 'skills/project-check-in/SKILL.md'));
+  assert.ok(fs.readFileSync(checkIn.path, 'utf8').includes(checkIn.content.trim()));
+  assert.match(checkIn.description, /project update/);
+  assert.match(checkIn.content, /Never overwrite, truncate, or purge an earlier check-in/);
   await h.request('/api/session', { agent: 'plan', location: { directory: h.home } });
   let home;
   do {
@@ -28,9 +34,31 @@ test('the packed plugin loads beside native goal, including at the home location
     await new Promise(resolve => setTimeout(resolve, 25));
   } while (Date.now() < deadline);
   assert.equal(home.data.find(item => item.id === 'prometheus')?.state.status, 'active');
+  const homeSkills = (await h.request(`/api/skill?location[directory]=${encodeURIComponent(h.home)}`)).data;
+  assert.equal(homeSkills.filter(skill => skill.id === 'project-check-in').length, 1);
   // No provider is allowed, and no command was invoked. Loading must not start model work.
   const context = await h.request(`/api/session/${session.id}/context`);
   assert.equal(context.data.length, 0);
   assert.equal(fs.existsSync(path.join(h.runtime, 'src/sandbox.mjs')), false);
   assert.equal(fs.existsSync(path.join(h.runtime, 'src/controller.mjs')), false);
+});
+
+test('a project skill takes precedence over the bundled default, including after reload', { timeout: 90000 }, async t => {
+  const h = await isolated(t);
+  const directory = path.join(h.root, '.opencode/skills/project-check-in');
+  fs.mkdirSync(directory, { recursive: true });
+  const file = path.join(directory, 'SKILL.md');
+  const source = '---\nname: Local check-in\ndescription: Keep the project-specific check-in.\n---\n\nLOCAL_CHECK_IN_SENTINEL\n';
+  fs.writeFileSync(file, source);
+  await h.create('plan');
+  for (const reload of [false, true]) {
+    if (reload) await h.request('/api/location/reload', {});
+    await until(async () => (await h.request('/api/plugin')).data.find(plugin => plugin.id === 'prometheus')?.state.status === 'active');
+    const skills = (await h.request('/api/skill')).data.filter(skill => skill.id === 'project-check-in');
+    assert.equal(skills.length, 1);
+    assert.equal(skills[0].path, file);
+    assert.equal(skills[0].name, 'Local check-in');
+    assert.equal(skills[0].content.trim(), 'LOCAL_CHECK_IN_SENTINEL');
+    assert.equal(fs.readFileSync(file, 'utf8'), source);
+  }
 });

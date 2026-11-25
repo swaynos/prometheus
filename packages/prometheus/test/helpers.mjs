@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import metadata from '../package.json' with { type: 'json' };
 
-export async function fixture(t, { agent = 'build', commands = [{ name: 'goal', description: 'Native goal.' }], values = new Map() } = {}) {
+export async function fixture(t, { agent = 'build', commands = [{ name: 'goal', description: 'Native goal.' }], skills = [], values = new Map() } = {}) {
   const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'prometheus-test-'));
   const root = fs.mkdirSync(path.join(base, 'project'), { recursive: true });
   const privateRoot = fs.mkdirSync(path.join(base, 'private'), { recursive: true });
@@ -24,6 +24,14 @@ export async function fixture(t, { agent = 'build', commands = [{ name: 'goal', 
     app: { version: metadata.dependencies['@opencode/plugin'] }, location: { directory: root }, options: {},
     storage: { get: async key => structuredClone(values.get(key)), set: async (key, value) => { values.set(key, structuredClone(value)); }, remove: async key => { values.delete(key); } },
     command: { list: async () => ({ data: commands }), transform: async callback => { callback({ add: c => commands.push(c) }); return registration('command'); } },
+    skill: { transform: async callback => {
+      const added = [];
+      callback({ get: id => skills.find(skill => skill.id === id), add: skill => { skills.push(skill); added.push(skill); } });
+      return { dispose: async () => {
+        for (const skill of added) { const index = skills.indexOf(skill); if (index !== -1) skills.splice(index, 1); }
+        disposed.push('skill');
+      } };
+    } },
     tool: { transform: async callback => { callback({ add: tool => tools.push(tool) }); return registration('tool'); } },
     permission: { assert: async input => { assertions.push(input); } },
     session: {
@@ -42,7 +50,7 @@ export async function fixture(t, { agent = 'build', commands = [{ name: 'goal', 
     event: { subscribe: async function* ({ signal }) { await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); } },
   };
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
-  return { base, root, store: { directory: privateRoot }, ctx, values, sessions, messages, hooks, commands, tools, prompts, synthetics, interrupts, assertions, disposed };
+  return { base, root, store: { directory: privateRoot }, ctx, values, sessions, messages, hooks, commands, skills, tools, prompts, synthetics, interrupts, assertions, disposed };
 }
 
 export const criteria = [{ id: 'greeting', description: 'greeting.txt contains hello.', validator: 'Read the file and run the declared project tests.' }];

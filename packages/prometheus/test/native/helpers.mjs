@@ -90,7 +90,7 @@ export default {id:'prometheus-fixture-provider',async setup(ctx){const p=Provid
   });
   async function request(route, body) {
     const endpoint = new URL(route, url);
-    if (['/api/plugin', '/api/command', '/api/config', '/api/location/reload'].includes(endpoint.pathname) && !endpoint.searchParams.has('location[directory]')) endpoint.searchParams.set('location[directory]', root);
+    if (['/api/plugin', '/api/command', '/api/skill', '/api/config', '/api/location/reload'].includes(endpoint.pathname) && !endpoint.searchParams.has('location[directory]')) endpoint.searchParams.set('location[directory]', root);
     const response = await fetch(endpoint, { method: body === undefined ? 'GET' : 'POST', headers: {
       'Content-Type': 'application/json', Authorization: `Basic ${Buffer.from(`opencode:${env.OPENCODE_SERVER_PASSWORD}`).toString('base64')}`,
     }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30000) }).catch(error => {

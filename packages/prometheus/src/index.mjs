@@ -4,6 +4,7 @@ import { commandInstructions } from './prompts.mjs';
 import { Records } from './records.mjs';
 import { Verification } from './verification.mjs';
 import { recordSchema, verificationSchema } from './contracts.mjs';
+import { projectCheckInSkill } from './skills.mjs';
 
 async function setup(ctx) {
   requireOpenCodeVersion(ctx.app.version);
@@ -14,6 +15,12 @@ async function setup(ctx) {
   const existing = (await ctx.command.list()).data;
   const collisions = existing.filter(command => commands.includes(command.name));
   if (collisions.length) throw new Error(`Prometheus did not replace existing commands: ${collisions.map(c => c.name).join(', ')}.`);
+
+  const checkIn = projectCheckInSkill();
+  registrations.push(await ctx.skill.transform(editor => {
+    // Keep user and project definitions, including skills hidden from autoinvocation.
+    if (!editor.get(checkIn.id)) editor.add(checkIn);
+  }));
 
   registrations.push(await ctx.command.transform(editor => {
     for (const name of commands) editor.add({

@@ -8,7 +8,7 @@
   "engines": { "node": ">=22.22.2 <25" },
   "prometheus": { "openCodeMajorVersion": 2, "minimumOpenCodeVersion": "2.2.1" },
   "exports": { ".": "./index.mjs" },
-  "files": ["index.mjs", "src/", "qualification/", "README.md"],
+  "files": ["index.mjs", "src/", "skills/", "qualification/", "README.md"],
   "scripts": {
     "test": "node --test --test-concurrency=2 test/*.test.mjs",
     "test:native": "node --test test/native/*.test.mjs",

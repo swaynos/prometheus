@@ -1,7 +1,7 @@
 # OpenCode Prometheus package
 
 Use Prometheus to investigate questions, clarify decisions, and verify candidates with OpenCode V2.
-It provides `/spike`, `/grill-me`, `prometheus_record`, and `prometheus_verify` under the [GPL-3.0-only license](../../LICENSE).
+It provides `/spike`, `/grill-me`, `prometheus_record`, `prometheus_verify`, and the `project-check-in` skill under the [GPL-3.0-only license](../../LICENSE).
 
 ## Compatibility and installation
 
@@ -24,6 +24,21 @@ The package pins `@opencode/plugin` and `@opencode/client` to `2.2.1`.
    ```
 
 3. If necessary, run `/reload` in OpenCode. Check that `/spike` and `/grill-me` are available.
+
+The package includes `skills/project-check-in/SKILL.md` and registers it with OpenCode when the plugin loads. No separate copy or skills configuration is needed. Unloading Prometheus removes its registration, not saved check-ins. An existing user or project skill with the same ID takes precedence and is not changed.
+
+## Project updates
+
+Ask for a project check-in or project update, or mention `@project-check-in`. The skill answers four questions in order:
+
+1. What is the goal?
+2. Where do we measure against that goal?
+3. What remains against the goal?
+4. How do we measure what remains?
+
+It names measurement sources and separates verified results from plans, unknowns, and untested work. When permitted, each run saves a new `YYYY-MM-DD-HHMMSS-project-check-in.md` using the user's local time and chosen or established documentation location. Numeric suffixes prevent collisions. On request, it appends a uniquely timestamped section to an existing Markdown file. Earlier check-ins are preserved. The skill does not start project work or change task or reminder state.
+
+The skill does not run tests, builds, project commands, or application code to produce a check-in. It reports existing evidence and describes how to measure unverified work. In Plan, read-only, or permission-denied contexts, it must not try another tool, agent, path, or method to bypass the restriction: it provides the update in the conversation when possible and clearly says it was not saved. If the project, destination, or local time zone is unclear, it asks rather than guessing. It reports a saved path only after the write succeeds and the resulting content is verified.
 
 To install from an archive, run `npm pack` in the package directory and extract the archive. Run `npm install --omit=dev --ignore-scripts` in the extracted `package/` directory, then register its absolute path as above.
 
