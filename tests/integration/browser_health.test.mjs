@@ -31,6 +31,66 @@ test("redactText scrubs emails, bearer tokens, JWTs, and opaque secrets", () => 
   assert.equal(redactText("Key a1b2c3d4e5f6g7h8i9j0k1l2m3n4"), "Key [redacted-token]");
 });
 
+test("health normalization repeatedly rejects sensitive selectors and paths, including URL and CSS escapes", () => {
+  const email = "alice@example.com";
+  const token = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4";
+  const selectors = [
+    `[data-testid="${email}"]`, `[data-testid="${email}"]`,
+    "#alice\\@example\\.com", "#alice\\40 example\\2e com",
+    `[data-testid="${encodeURIComponent(email)}"]`,
+    `#account-${token}`, `[aria-label="Bearer ${token}"]`,
+    "#eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
+  ];
+  for (let i = 0; i < 3; i++) {
+    const health = normaliseHealthContext({
+      checkUrl: "https://site.example/",
+      loginUrl: `https://site.example/reset/${token}`,
+      signals: {
+        healthySelectors: [...selectors, "#account-menu"],
+        unhealthySelectors: [...selectors, 'input[type="password"]'],
+        unhealthyUrlPaths: [`/user/${encodeURIComponent(email)}`, `/reset/${token}`, "/login"],
+      },
+      after: {
+        approvedOrigin: true, url: "https://site.example/",
+        controls: selectors.map(selector => ({
+          tag: "button", selector, hrefPath: `/user/${email}`, label: email, role: token,
+        })),
+        landmarks: selectors.map(selector => ({ tag: "nav", selector })),
+      },
+    }, ["https://site.example"]);
+    assert.deepEqual(health.signals.healthySelectors, ["#account-menu"]);
+    assert.deepEqual(health.signals.unhealthySelectors, ['input[type="password"]']);
+    assert.deepEqual(health.signals.unhealthyUrlPaths, ["/login"]);
+    assert.equal(health.loginUrl, null);
+    assert.ok(health.after.controls.every(control => !control.selector && !control.hrefPath));
+    assert.ok(health.after.landmarks.every(landmark => !landmark.selector));
+    assert.doesNotMatch(JSON.stringify(health), /alice|a1b2c3|eyJhbG/);
+  }
+  assert.equal(sanitizeHealthUrl(`https://site.example/reset/${token}`), null);
+  assert.equal(sanitizeHealthUrl(`https://site.example/user/${encodeURIComponent(email)}`), null);
+  assert.throws(() => normaliseHealthContext({ checkUrl: `https://site.example/reset/${token}` }), /checkUrl/);
+});
+
+test("generic public DOM changes cannot establish healthy account indicators", () => {
+  const snapshot = elementSelectors => ({
+    approvedOrigin: true, url: "https://site.example/", hasAuthForm: false, elementSelectors,
+  });
+  const health = buildHealthContext({
+    before: snapshot([]), after: snapshot(["#promo-banner", "#menu", "#dashboard"]),
+    origins: ["https://site.example"],
+  });
+  assert.deepEqual(health.signals.healthySelectors, []);
+  assert.equal(classifyLiveHealth({
+    health,
+    live: { url: health.checkUrl, origin: "https://site.example", pathname: "/",
+      httpStatus: 200, hasAuthForm: false, matchedHealthySelectors: [], matchedUnhealthySelectors: [] },
+  }).status, "inconclusive");
+  // Old captures are re-filtered when read, not trusted as account evidence.
+  assert.deepEqual(normaliseHealthContext({
+    checkUrl: health.checkUrl, signals: { healthySelectors: ["#promo-banner"] },
+  }).signals.healthySelectors, []);
+});
+
 test("captureLoginSnapshot and buildHealthContext capture same-URL before/after diff without leaking secrets", async () => {
   const browser = await chromium.launch({ headless: true });
   try {

@@ -61,6 +61,18 @@ test("rule is bounded and does not restore retired workflows", async () => {
   assert.doesNotMatch(text, /prometheus_browser_fallback|playwright-image-generation/);
 });
 
+test("denial reference agrees with the rule that non-retryable denial means stop", async () => {
+  const rule = await load("rules/resource-selection.md");
+  const reference = await load("docs/RESOURCE-SELECTION.md");
+  assert.match(rule, /stop and report if `retryable: false`/);
+  const row = reference.split("| `retryable: false`")[1]?.split("|")[1];
+  assert.ok(row, "missing non-retryable denial procedure");
+  assert.match(row, /stop and report\. do not change settings or retry automatically/);
+  assert.doesNotMatch(row, /or apply|untried setting/);
+  assert.match(reference, /inferred dom health is advisory/);
+  assert.match(reference, /snapshots are omitted by default/);
+});
+
 test("rewritten procedures retain paid authorization, unknown outcomes, and human-control limits", async () => {
   const captcha = await load("docs/BROWSER-2CAPTCHA.md");
   for (const clause of [

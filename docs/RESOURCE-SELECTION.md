@@ -233,6 +233,14 @@ It derives differential signals (`checkUrl`, `healthySelectors`, `unhealthySelec
 - Call `browser_session_health` with no arguments to inspect the captured health blueprint (`status: "not_open"` if no browser is running) or evaluate the active page in milliseconds without extra navigation.
 - Pass `navigate_to_check_url: true` to hydrate state, navigate to `checkUrl`, and evaluate live DOM health in one call.
 - Verdicts are `healthy`, `unhealthy`, or `inconclusive` (when on an unrelated subpage or when pre/post DOMs had no distinguishing selectors).
+- Inferred DOM health is advisory. A `healthy` result never marks saved authentication as verified.
+  Generic page changes, a composer, or a redirect do not prove login or task access.
+  Verify the actual account UI or requested task access independently.
+  Legacy account-verification selectors are checked only on the saved authentication origin, without HTTP 401/403.
+- Snapshots are omitted by default. Use `include_snapshots: true` only when structural details are needed.
+  Email, bearer/JWT, and opaque token-like selector and path values are rejected, including encoded forms.
+  Unsafe check URLs invalidate the health context; unsafe optional paths, selectors, and snapshots are omitted.
+  Pattern filtering is conservative, not proof that arbitrary page text contains no secrets.
 - `browser_status` also surfaces `sessionHealth` for origins with captured health context.
 
 ### Login route and proxy session
@@ -313,14 +321,14 @@ On HTTP 401/403 or a Cloudflare challenge, inspect `lastDenial` in `browser_stat
 - `settings.configured` / `settings.effective`: active setting names and modes only (never header contents, tokens, or signed URLs).
 - `retryable`: `true` or `false`.
 - `reason`: plain-language summary.
-- `suggestions`: concrete setting changes to try (empty for managed challenges).
+- `suggestions`: concrete setting changes to try (empty whenever `retryable: false`).
 
 | Signal | Action |
 | --- | --- |
 | `retryable: true` (first HTTP 401/403 for this URL and settings within 15 minutes) | Change settings using `lastDenial.suggestions` (channel, profile, compatibility mode, execution mode, humanize, saved login state, or `browser_rotate_proxy`) and navigate again. |
-| `retryable: false` (repeated 401/403 with unchanged URL and settings within 15 minutes, or a managed challenge) | Stop and report (or apply an untried setting change before retrying a 401/403). Never repeat unchanged settings, guess credentials, or bypass a configured or user-requested proxy to direct routing. |
+| `retryable: false` (repeated 401/403 with unchanged URL and settings within 15 minutes, or a managed challenge) | Stop and report. Do not change settings or retry automatically. Never guess credentials or bypass a configured or user-requested proxy to direct routing. |
 
-In-memory 15-minute TTL cache: the server fingerprints `(exact URL, settings)` privately in memory for 15 minutes (`PROMETHEUS_BROWSER_DENIAL_TTL_MS` overrides for tests). It is not a historical log: missing, expired, or cleared entries (after HTTP 2xx/3xx recovery, `browser_close`, or server restart) imply the URL is healthy to try again.
+In-memory 15-minute TTL cache: the server fingerprints `(exact URL, settings)` privately in memory for 15 minutes (`PROMETHEUS_BROWSER_DENIAL_TTL_MS` overrides for tests). It is not a historical log. Missing, expired, or cleared entries (after HTTP 2xx/3xx recovery, `browser_close`, or server restart) do not prove access, clear a reported stop, or authorize replay of an unknown action.
 
 Record intent before non-idempotent actions.
 After interruption, mark the outcome unknown.

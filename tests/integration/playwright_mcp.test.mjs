@@ -37,7 +37,7 @@ function fixtureServer() {
     }
     if (req.url === "/denied") {
       res.writeHead(403, { "content-type": "text/html" });
-      res.end("<!doctype html><title>Denied</title><h1>Access denied</h1>");
+      res.end('<!doctype html><title>Denied</title><h1>Access denied</h1><button id="account-menu">Public account</button>');
       return;
     }
     if (req.url === "/second") {
@@ -658,9 +658,9 @@ test("browser_session_health inspects blueprints before launch and evaluates hea
     loginUrl: `${origin}/`,
     sameUrlComparison: true,
     signals: {
-      healthySelectors: ["#account-menu"],
-      unhealthySelectors: [],
-      unhealthyUrlPaths: [],
+      healthySelectors: ["#account-menu", "#promo-banner", '[data-testid="alice@example.com"]', '[data-testid="alice@example.com"]'],
+      unhealthySelectors: ["#token-a1b2c3d4e5f6g7h8i9j0k1l2m3n4"],
+      unhealthyUrlPaths: ["/user/alice%40example.com"],
       externalAuthOrigins: [],
     },
     before: {
@@ -681,7 +681,11 @@ test("browser_session_health inspects blueprints before launch and evaluates hea
       hasAuthForm: false,
       headings: ["Fixture Home"],
       landmarks: [],
-      controls: [{ tag: "button", selector: "#account-menu", label: "Signed in account" }],
+      controls: [
+        { tag: "button", selector: "#account-menu", label: "Signed in account" },
+        { tag: "button", selector: '[data-testid="alice@example.com"]', label: "alice@example.com" },
+        { tag: "button", selector: '[data-testid="alice@example.com"]', hrefPath: "/reset/a1b2c3d4e5f6g7h8i9j0k1l2m3n4" },
+      ],
     },
   };
 
@@ -722,7 +726,13 @@ test("browser_session_health inspects blueprints before launch and evaluates hea
     assert.equal(preOpen.status, "not_open");
     assert.equal(preOpen.checkUrl, `${origin}/`);
     assert.deepEqual(preOpen.signals.healthySelectors, ["#account-menu"]);
-    assert.equal(preOpen.after.controls[0].selector, "#account-menu");
+    assert.deepEqual(preOpen.signals.unhealthySelectors, []);
+    assert.deepEqual(preOpen.signals.unhealthyUrlPaths, []);
+    assert.equal(preOpen.before, undefined);
+    assert.equal(preOpen.after, undefined);
+    const detailed = await healthyClient.call("browser_session_health", { include_snapshots: true });
+    assert.equal(JSON.parse(healthyClient.textOf(detailed)).after.controls[0].selector, "#account-menu");
+    assert.doesNotMatch(JSON.stringify(detailed), /alice|a1b2c3/);
     assert.equal(JSON.parse(healthyClient.textOf(await healthyClient.call("browser_status"))).contextOpen, false);
 
     // 2. Fast live check with navigate_to_check_url: true when session is healthy
@@ -735,8 +745,9 @@ test("browser_session_health inspects blueprints before launch and evaluates hea
     assert.equal(healthyCheck.before, undefined);
 
     const healthyStatus = JSON.parse(healthyClient.textOf(await healthyClient.call("browser_status")));
-    assert.equal(healthyStatus.hydratedAuthentication, true);
-    assert.equal(healthyStatus.authenticationVerification, "verified");
+    // Inferred health cannot promote user-confirmed restoration into authentication.
+    assert.equal(healthyStatus.hydratedAuthentication, false);
+    assert.equal(healthyStatus.authenticationVerification, "pending");
     assert.equal(healthyStatus.sessionHealth.status, "healthy");
     assert.equal(healthyStatus.sessionHealth.checkUrl, `${origin}/`);
 
@@ -746,6 +757,9 @@ test("browser_session_health inspects blueprints before launch and evaluates hea
     const subCheck = JSON.parse(healthyClient.textOf(await healthyClient.call("browser_session_health", {})));
     assert.equal(subCheck.status, "inconclusive");
     assert.match(subCheck.reason, /differs from checkUrl/);
+    assert.equal(subCheck.before, undefined);
+    assert.equal(subCheck.after, undefined);
+    assert.doesNotMatch(JSON.stringify(subCheck), /alice|a1b2c3/);
 
     // 4. Expired session on checkUrl reports unhealthy and keeps hydratedAuthentication false
     const expiredNav = await expiredClient.call("browser_navigate", { url: `${base}/` });
@@ -762,5 +776,44 @@ test("browser_session_health inspects blueprints before launch and evaluates hea
       await rm(root, { recursive: true, force: true });
       await rm(expiredRoot, { recursive: true, force: true });
     }
+  }
+});
+
+test("legacy session health never accepts an account selector on a foreign origin or denied page", async () => {
+  const { httpServer, base } = await fixtureServer();
+  const root = await mkdtemp(path.join(os.tmpdir(), "prometheus-health-origin-"));
+  const origin = new URL(base).origin;
+  const sessions = path.join(root, "prometheus-sessions");
+  await mkdir(sessions, { mode: 0o700 });
+  await writeFile(path.join(sessions, "account.json"), JSON.stringify({
+    schemaVersion: 1, name: "account", origins: [origin],
+    storageState: { cookies: [], origins: [{ origin, localStorage: [{ name: "authenticated", value: "yes" }] }] },
+    verification: { selector: "#account-menu" },
+  }), { mode: 0o600 });
+  const c = client({ PROMETHEUS_CONFIG_DIR: root });
+  try {
+    await c.call("browser_navigate", { url: `${base}/` });
+    const valid = JSON.parse(c.textOf(await c.call("browser_session_health", { origin })));
+    assert.equal(valid.status, "healthy");
+    assert.equal(JSON.parse(c.textOf(await c.call("browser_status"))).authenticationVerification, "verified");
+
+    await c.call("browser_navigate", {
+      url: `data:text/html,${encodeURIComponent('<button id="account-menu">Public account</button>')}`,
+    });
+    const foreign = JSON.parse(c.textOf(await c.call("browser_session_health", { origin })));
+    assert.equal(foreign.status, "unhealthy");
+    assert.match(foreign.reason, /outside the saved authentication origin/);
+    assert.equal(JSON.parse(c.textOf(await c.call("browser_status"))).hydratedAuthentication, false);
+
+    await c.call("browser_navigate", { url: `${base}/` });
+    assert.equal(JSON.parse(c.textOf(await c.call("browser_status"))).authenticationVerification, "verified");
+    await c.call("browser_navigate", { url: `${base}/denied` });
+    const denied = JSON.parse(c.textOf(await c.call("browser_session_health", { origin })));
+    assert.equal(denied.status, "unhealthy");
+    assert.match(denied.reason, /access denial/);
+    assert.equal(JSON.parse(c.textOf(await c.call("browser_status"))).authenticationVerification, "pending");
+  } finally {
+    try { await closeFixture(httpServer, c); }
+    finally { await rm(root, { recursive: true, force: true }); }
   }
 });

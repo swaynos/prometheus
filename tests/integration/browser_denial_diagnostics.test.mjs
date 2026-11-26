@@ -120,7 +120,9 @@ test('repeated identical denial flips retryable to false while private URL and c
     const status2 = JSON.parse(c.textOf(await c.call('browser_status', {})));
     assert.equal(status2.lastDenial.retryable, false);
     assert.match(status2.lastDenial.reason, /same url and settings already failed/i);
-    assert.ok(status2.lastDenial.suggestions.length > 0, 'still provides untried configuration suggestions');
+    assert.match(status2.lastDenial.reason, /stop and report/i);
+    assert.deepEqual(status2.lastDenial.suggestions, [], 'non-retryable denial must not invite another settings change');
+    assert.doesNotMatch(second, /change settings/);
 
     // Different query param on same path has a distinct private fingerprint (no query leak).
     const differentQuery = c.textOf(await c.call('browser_navigate', { url: `${f.base}/always-403?sig=beta` }));
@@ -153,7 +155,7 @@ test('denial cache expires after TTL, clears on healthy navigation, and clears o
     const first = c.textOf(await c.call('browser_navigate', { url: `${f.base}/always-403` }));
     assert.match(first, /retryable: true/i);
 
-    // Wait past TTL: missing/expired cache entry implies URL is healthy again.
+    // Expiry removes diagnostics; it does not prove access or authorize another attempt.
     await new Promise(r => setTimeout(r, 220));
     const statusAfterTtl = JSON.parse(c.textOf(await c.call('browser_status', {})));
     assert.equal(statusAfterTtl.lastDenial, undefined, 'expired lastDenial omitted from browser_status');

@@ -12,18 +12,31 @@ const MAX_ELEMENT_SELECTORS = 50;
 const MAX_SIGNAL_SELECTORS = 10;
 const MAX_URL_PATHS = 5;
 
-const POSITIVE_AUTH_RE = /account|profile|user|member|avatar|logout|log-?out|sign-?out|signout|dashboard|settings|orders|billing|wallet|inbox|workspace|menu/i;
+const POSITIVE_AUTH_RE = /account|profile|member|avatar|logout|log-?out|sign-?out|signout|(?:^|[^a-z])user(?:[^a-z]|$)/i;
 const NEGATIVE_AUTH_RE = /password|login|log-?in|sign-?in|signin|auth|sso|register|signup|sign-?up|forgot/i;
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi;
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]*)?\b/g;
 const OPAQUE_TOKEN_RE = /\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}\b/g;
 
+function hasSensitiveValue(value) {
+  // Inspect encoded URL/CSS values too. Never use stateful global .test().
+  let decoded = value;
+  for (let i = 0; i < 3; i++) {
+    try { decoded = decodeURIComponent(decoded); } catch { break; }
+  }
+  decoded = decoded.replace(/\\([0-9a-f]{1,6})\s?|\\([^\r\n])/gi,
+    (_, hex, escaped) => hex ? String.fromCodePoint(Math.min(parseInt(hex, 16), 0x10ffff)) : escaped);
+  return [EMAIL_RE, BEARER_RE, JWT_RE, OPAQUE_TOKEN_RE]
+    .some(pattern => new RegExp(pattern.source, "i").test(decoded));
+}
+
 export function sanitizeHealthUrl(rawUrl) {
   if (typeof rawUrl !== "string" || !rawUrl) return null;
   let parsed;
   try { parsed = new URL(rawUrl); } catch { return null; }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  if (hasSensitiveValue(parsed.origin + parsed.pathname)) return null;
   const pathname = (parsed.pathname || "/").slice(0, 200);
   return {
     origin: parsed.origin,
@@ -49,9 +62,7 @@ function sanitizeSelector(selector) {
   const trimmed = selector.trim();
   if (!trimmed || trimmed.length > 160) return null;
   if (/[\r\n\0]/.test(trimmed)) return null;
-  if (EMAIL_RE.test(trimmed) || JWT_RE.test(trimmed)) return null;
-  EMAIL_RE.lastIndex = 0;
-  JWT_RE.lastIndex = 0;
+  if (hasSensitiveValue(trimmed)) return null;
   return trimmed;
 }
 
@@ -60,13 +71,14 @@ function sanitizeOrigin(raw) {
   let parsed;
   try { parsed = new URL(raw); } catch { return null; }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  if (hasSensitiveValue(parsed.origin)) return null;
   return parsed.origin;
 }
 
 function sanitizePath(raw) {
   if (typeof raw !== "string" || !raw.startsWith("/")) return null;
   const clean = raw.split(/[?#]/)[0].trim();
-  if (!clean || clean.length > 200) return null;
+  if (!clean || clean.length > 200 || hasSensitiveValue(clean)) return null;
   return clean;
 }
 
@@ -97,10 +109,10 @@ function normalizeCapturedSnapshot(raw, fallbackUrl) {
     .slice(0, MAX_LANDMARKS)
     .map((entry) => {
       if (!entry || typeof entry !== "object") return null;
-      const tag = typeof entry.tag === "string" ? entry.tag.toLowerCase().slice(0, 24) : "";
+      const tag = redactText(entry.tag, 24).toLowerCase();
       if (!tag) return null;
       const selector = sanitizeSelector(entry.selector);
-      const role = typeof entry.role === "string" && entry.role.trim() ? entry.role.trim().slice(0, 32) : undefined;
+      const role = redactText(entry.role, 32) || undefined;
       const interactiveCount = Number.isInteger(entry.interactiveCount) && entry.interactiveCount >= 0
         ? Math.min(entry.interactiveCount, 1000)
         : 0;
@@ -117,11 +129,11 @@ function normalizeCapturedSnapshot(raw, fallbackUrl) {
     .slice(0, MAX_CONTROLS)
     .map((entry) => {
       if (!entry || typeof entry !== "object") return null;
-      const tag = typeof entry.tag === "string" ? entry.tag.toLowerCase().slice(0, 24) : "";
+      const tag = redactText(entry.tag, 24).toLowerCase();
       if (!tag) return null;
       const selector = sanitizeSelector(entry.selector);
-      const type = typeof entry.type === "string" && entry.type.trim() ? entry.type.trim().toLowerCase().slice(0, 24) : undefined;
-      const role = typeof entry.role === "string" && entry.role.trim() ? entry.role.trim().slice(0, 32) : undefined;
+      const type = redactText(entry.type, 24).toLowerCase() || undefined;
+      const role = redactText(entry.role, 32) || undefined;
       const hrefPath = entry.hrefPath === "external" ? "external" : sanitizePath(entry.hrefPath);
       const label = redactText(entry.label, 60);
       return {
@@ -333,7 +345,7 @@ export async function captureLoginSnapshot(page, approvedOrigins = [], timeoutMs
           role: el.getAttribute("role") || undefined,
           selector: stableSelector(el) || undefined,
           hrefPath,
-          label: rawLabel.replace(/\s+/g, " ").trim().slice(0, 80),
+          label: rawLabel.length <= 80 ? rawLabel : "",
         });
       }
 
@@ -341,7 +353,8 @@ export async function captureLoginSnapshot(page, approvedOrigins = [], timeoutMs
       for (const el of document.querySelectorAll("h1, h2, h3")) {
         if (headings.length >= maxHeadings) break;
         if (!isVisible(el)) continue;
-        const text = (el.innerText || "").replace(/\s+/g, " ").trim().slice(0, 100);
+        const text = el.innerText || "";
+        if (text.length > 100) continue;
         if (text && !headings.includes(text)) headings.push(text);
       }
 
@@ -363,7 +376,7 @@ export async function captureLoginSnapshot(page, approvedOrigins = [], timeoutMs
         url: `${location.origin}${location.pathname}`,
         origin: location.origin,
         pathname: location.pathname,
-        title: (document.title || "").slice(0, 140),
+        title: document.title.length <= 140 ? document.title : "",
         hasAuthForm,
         headings,
         landmarks,
@@ -431,6 +444,11 @@ function selectorLabelMap(snapshot) {
   return map;
 }
 
+function accountIndicator(selector, labels) {
+  const text = `${selector} ${labels.get(selector) || ""}`;
+  return POSITIVE_AUTH_RE.test(text) && !NEGATIVE_AUTH_RE.test(text);
+}
+
 export function buildHealthContext({ before = null, after, origins = [] } = {}) {
   const normAfter = normalizeCapturedSnapshot(after);
   if (!normAfter || !normAfter.approvedOrigin) return null;
@@ -444,6 +462,7 @@ export function buildHealthContext({ before = null, after, origins = [] } = {}) 
 
   const healthyCandidates = normAfter.elementSelectors
     .filter((sel) => !beforeSelectors.has(sel) && sel !== 'input[type="password"]')
+    .filter((sel) => accountIndicator(sel, afterLabels))
     .map((sel) => ({ sel, score: scoreSelector(sel, "healthy", afterLabels.get(sel) || "") }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || a.sel.localeCompare(b.sel))
@@ -496,10 +515,14 @@ export function normaliseHealthContext(health, allowedOrigins = []) {
   }
   const loginInfo = health.loginUrl ? sanitizeHealthUrl(health.loginUrl) : null;
   const rawSignals = health.signals && typeof health.signals === "object" ? health.signals : {};
+  const normBefore = health.before ? stripInternalSnapshotFields(normalizeCapturedSnapshot(health.before)) : null;
+  const normAfter = health.after ? stripInternalSnapshotFields(normalizeCapturedSnapshot(health.after, checkInfo.url)) : null;
+  const afterLabels = selectorLabelMap(normAfter);
 
   const signals = {
     healthySelectors: uniqueBounded(
-      (Array.isArray(rawSignals.healthySelectors) ? rawSignals.healthySelectors : []).map(sanitizeSelector),
+      (Array.isArray(rawSignals.healthySelectors) ? rawSignals.healthySelectors : [])
+        .map(sanitizeSelector).filter(selector => selector && accountIndicator(selector, afterLabels)),
       MAX_SIGNAL_SELECTORS,
     ),
     unhealthySelectors: uniqueBounded(
@@ -516,8 +539,6 @@ export function normaliseHealthContext(health, allowedOrigins = []) {
     ),
   };
 
-  const normBefore = health.before ? stripInternalSnapshotFields(normalizeCapturedSnapshot(health.before)) : null;
-  const normAfter = health.after ? stripInternalSnapshotFields(normalizeCapturedSnapshot(health.after, checkInfo.url)) : null;
   const capturedAt = typeof health.capturedAt === "string" && !Number.isNaN(Date.parse(health.capturedAt))
     ? health.capturedAt
     : new Date().toISOString();
@@ -603,7 +624,7 @@ export function classifyLiveHealth({ live, health, approvedOrigins = [] }) {
   if (matchedHealthy.length > 0 && matchedUnhealthy.length === 0 && !unexpectedAuthForm && !onUnhealthyPath) {
     return {
       status: "healthy",
-      reason: `matched ${matchedHealthy.length} post-login healthy selector(s) with no pre-login auth controls`,
+      reason: `matched ${matchedHealthy.length} post-login account indicator(s); advisory only, verify task access directly`,
     };
   }
   if (matchedHealthy.length > 0 && (matchedUnhealthy.length > 0 || unexpectedAuthForm)) {

@@ -400,6 +400,10 @@ async function maybeHydrate(url) {
 
 async function verifyHydratedAccount(page, hydration) {
   if (!hydration) return;
+  if (new URL(page.url()).origin !== hydration.origin) {
+    verifiedOrigins.delete(hydration.origin);
+    return;
+  }
   if (hydration.method === "user-confirmed") {
     if (hydration.health) {
       const assessment = await evaluatePageHealth(page, hydration.health, {
@@ -407,15 +411,15 @@ async function verifyHydratedAccount(page, hydration) {
         approvedOrigins: hydration.origins || [hydration.origin],
       });
       originHealthResults.set(hydration.origin, assessment);
-      if (assessment.status === "healthy") verifiedOrigins.add(hydration.origin);
-      else if (assessment.status === "unhealthy") verifiedOrigins.delete(hydration.origin);
+      // Inferred DOM health is advisory, never account verification.
+      if (assessment.status === "unhealthy") verifiedOrigins.delete(hydration.origin);
     }
     return;
   }
-  if (verifiedOrigins.has(hydration.origin)) return;
   let visible = false;
   try { visible = await page.locator(hydration.selector).first().isVisible(); } catch {}
   if (!visible) {
+    verifiedOrigins.delete(hydration.origin);
     throw new Error("saved login state has no visible account evidence in the task browser; complete a new login capture");
   }
   verifiedOrigins.add(hydration.origin);
@@ -746,7 +750,7 @@ function denialSettingsSnapshot(pageUrl) {
   const effective = { ...configured, humanize: Boolean(SESSION_CONFIG.humanize) };
   let origin = null;
   try { origin = pageUrl ? new URL(pageUrl).origin : null; } catch {}
-  effective.authenticated = Boolean(origin && hydratedOrigins.has(origin));
+  effective.authenticated = Boolean(origin && verifiedOrigins.has(origin));
   if (proxySession) {
     effective.proxyId = proxySession.proxyId;
     effective.proxyGeneration = proxySession.generation;
@@ -817,7 +821,7 @@ function recordDenial(status, pageUrl, challenge = false, stage = "http_response
   const expiresAt = now + DENIAL_TTL_MS;
   denialCache.set(fingerprint, { expiresAt });
   const retryable = !challenge && !repeated;
-  const suggestions = buildDenialSuggestions(effective, origin, challenge);
+  const suggestions = retryable ? buildDenialSuggestions(effective, origin, challenge) : [];
   lastDenial = {
     stage,
     status,
@@ -827,7 +831,7 @@ function recordDenial(status, pageUrl, challenge = false, stage = "http_response
     reason: challenge
       ? "managed challenge; stop and report"
       : repeated
-        ? "same URL and settings already failed; change settings or stop"
+        ? "same URL and settings already failed; stop and report"
         : "change settings from suggestions to retry, or stop",
     suggestions,
     at: new Date(now).toISOString(),
@@ -1166,7 +1170,7 @@ const HANDLERS = {
       throw new Error("include_snapshots must be boolean");
     }
     const navigateToCheckUrl = Boolean(args.navigate_to_check_url);
-    const includeSnapshots = args.include_snapshots === undefined ? true : args.include_snapshots;
+    const includeSnapshots = args.include_snapshots === true;
     const origin = resolveTargetHealthOrigin(args.origin);
     if (!origin) {
       return text({ status: "no_saved_state", reason: "no open page origin or saved authentication state found" });
@@ -1179,14 +1183,21 @@ const HANDLERS = {
       const page = pages[activeIndex];
       const pageOpen = Boolean(page && !page.isClosed());
       if (saved.verification?.selector && pageOpen) {
+        const sameOrigin = new URL(page.url()).origin === origin;
+        const denied = [401, 403].includes(navigationStatuses.get(page));
         let visible = false;
-        try { visible = await page.locator(saved.verification.selector).first().isVisible(); } catch {}
+        if (sameOrigin && !denied) {
+          try { visible = await page.locator(saved.verification.selector).first().isVisible(); } catch {}
+        }
+        if (!visible) verifiedOrigins.delete(origin);
         return text({
           status: visible ? "healthy" : "unhealthy",
           origin,
           hasHealthContext: false,
           hasVerificationSelector: true,
-          reason: visible ? "matched verification selector" : "verification selector is not visible",
+          reason: !sameOrigin ? "active page is outside the saved authentication origin"
+            : denied ? "active page returned access denial"
+            : visible ? "matched verification selector" : "verification selector is not visible",
         });
       }
       return text({
@@ -1248,8 +1259,7 @@ const HANDLERS = {
     }
     originHealthResults.set(origin, assessment);
     if (hydratedOrigins.has(origin)) {
-      if (assessment.status === "healthy") verifiedOrigins.add(origin);
-      else if (assessment.status === "unhealthy") verifiedOrigins.delete(origin);
+      if (assessment.status === "unhealthy") verifiedOrigins.delete(origin);
     }
     return text({
       status: assessment.status,
